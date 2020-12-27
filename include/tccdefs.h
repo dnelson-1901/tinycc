@@ -1,9 +1,9 @@
 /*  tccdefs.h
  *
- *  By using native platfórm macros this file may be included at runtime
+ *  By using native platform macros this file may be included at runtime
  *  just as is.
  *
- *  If converted to C-strings and included in tccpp.c, these are trahslated
+ *  If converted to C-strings and included in tccpp.c, these are translated
  *  to tcc target macros accordingly.
  */
 
