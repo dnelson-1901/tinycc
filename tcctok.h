@@ -92,6 +92,8 @@
      DEF(TOK___VA_ARGS__, "__VA_ARGS__")
      DEF(TOK___COUNTER__, "__COUNTER__")
      DEF(TOK___HAS_INCLUDE, "__has_include")
+     DEF(TOK___HAS_ATTRIBUTE, "__has_attribute")
+     DEF(TOK___HAS_BUILTIN, "__has_builtin")
 
 /* special identifiers */
      DEF(TOK___FUNC__, "__func__")
@@ -151,6 +153,7 @@
      DEF(TOK_VISIBILITY1, "visibility")
      DEF(TOK_VISIBILITY2, "__visibility__")
 
+/* builtin identifiers */
      DEF(TOK_builtin_types_compatible_p, "__builtin_types_compatible_p")
      DEF(TOK_builtin_choose_expr, "__builtin_choose_expr")
      DEF(TOK_builtin_constant_p, "__builtin_constant_p")

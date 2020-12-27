@@ -3337,6 +3337,37 @@ static int macro_subst_tok(
                      tm->tm_hour, tm->tm_min, tm->tm_sec);
         }
         cstrval = buf;
+        goto add_cstr;
+    } else if (tok == TOK___HAS_ATTRIBUTE) {
+        next();
+        skip('(');
+        while (tok != ')' && tok != TOK_EOF) {
+          t = tok;
+          next();
+        }
+        if (tok != ')')
+          expect("')'");
+        snprintf(buf, sizeof(buf), "%d", (t >= TOK_SECTION1 && t <= TOK_VISIBILITY2));
+        cstrval = buf;
+        t1 = TOK_PPNUM;
+        goto add_cstr1;
+    } else if (tok == TOK___HAS_BUILTIN) {
+        next();
+        skip('(');
+        while (tok != ')' && tok != TOK_EOF) {
+          t = tok;
+          next();
+        }
+        if (tok != ')')
+          expect("')'");
+        /* XXX the last defined builtin varies based on platform, so the
+           upper check is against the first subsequent identifier (TOK_pack)
+           instead */
+        snprintf(buf, sizeof(buf), "%d", (t >= TOK_builtin_types_compatible_p && t < TOK_pack));
+        cstrval = buf;
+        t1 = TOK_PPNUM;
+        goto add_cstr1;
+    } else if (0) {
     add_cstr:
         t1 = TOK_STR;
     add_cstr1:
@@ -3828,6 +3859,8 @@ ST_FUNC void tccpp_new(TCCState *s)
     define_push(TOK___DATE__, MACRO_OBJ, NULL, NULL);
     define_push(TOK___TIME__, MACRO_OBJ, NULL, NULL);
     define_push(TOK___COUNTER__, MACRO_OBJ, NULL, NULL);
+    define_push(TOK___HAS_ATTRIBUTE, MACRO_OBJ, NULL, NULL);
+    define_push(TOK___HAS_BUILTIN, MACRO_OBJ, NULL, NULL);
 }
 
 ST_FUNC void tccpp_delete(TCCState *s)
