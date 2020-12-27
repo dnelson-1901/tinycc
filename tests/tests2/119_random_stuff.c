@@ -73,14 +73,24 @@ void tst_compare(void)
   printf ("tst_compare: %s\n", tst() > 0 ? "error" : "ok");
 }
 
+/* try all the #pragma pack variants */
+#pragma pack(push)
 #pragma pack(1)
-struct S { int d:24; int f:14; } i, j;
+#pragma pack(push,2)
+struct S2 { int d:24; int f:14; } i2, j2;
+#pragma pack(pop)
+struct S1 { int d:24; int f:14; } i1, j1;
 #pragma pack()
+#pragma pack(pop)
 
 void tst_pack (void)
 {
-  i.f = 5; j.f = 5;
-  printf("tst_pack: j.f = %d, i.f = %d\n", j.f, i.f);
+  i1.f = 5; j1.f = 5;
+  i2.f = 5; j2.f = 5;
+  printf("tst_pack1: size=%zd, j1.f = %d, i1.f = %d\n",
+    sizeof(i1), j1.f, i1.f);
+  printf("tst_pack2: size=%zd, j2.f = %d, i2.f = %d\n",
+    sizeof(i2), j2.f, i2.f);
 }
 
 void tst_cast(void)

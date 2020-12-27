@@ -1686,6 +1686,7 @@ static void pragma_parse(TCCState *s1)
         /* This may be:
            #pragma pack(1) // set
            #pragma pack() // reset to default
+           #pragma pack(push) // push
            #pragma pack(push,1) // push & set
            #pragma pack(pop) // restore previous */
         next();
@@ -1699,14 +1700,15 @@ static void pragma_parse(TCCState *s1)
             s1->pack_stack_ptr--;
         } else {
             int val = 0;
-            if (tok != ')') {
-                if (tok == TOK_ASM_push) {
+            if (tok == TOK_ASM_push) {
+                next();
+                if (s1->pack_stack_ptr >= s1->pack_stack + PACK_STACK_SIZE - 1)
+                    goto stk_error;
+                s1->pack_stack_ptr++;
+                if (tok == ',')
                     next();
-                    if (s1->pack_stack_ptr >= s1->pack_stack + PACK_STACK_SIZE - 1)
-                        goto stk_error;
-                    s1->pack_stack_ptr++;
-                    skip(',');
-                }
+            }
+            if (tok != ')') {
                 if (tok != TOK_CINT)
                     goto pragma_err;
                 val = tokc.i;
