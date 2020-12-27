@@ -837,6 +837,7 @@ LIBTCCAPI void tcc_delete(TCCState *s1)
     tcc_free(s1->fini_symbol);
     tcc_free(s1->outfile);
     tcc_free(s1->deps_outfile);
+    tcc_free(s1->deps_target);
     dynarray_reset(&s1->files, &s1->nb_files);
     dynarray_reset(&s1->target_deps, &s1->nb_target_deps);
     dynarray_reset(&s1->pragma_libs, &s1->nb_pragma_libs);
@@ -1461,6 +1462,8 @@ enum {
     TCC_OPTION_E,
     TCC_OPTION_MD,
     TCC_OPTION_MF,
+    TCC_OPTION_MP,
+    TCC_OPTION_MT,
     TCC_OPTION_x,
     TCC_OPTION_ar,
     TCC_OPTION_impdef,
@@ -1526,7 +1529,10 @@ static const TCCOption tcc_options[] = {
     { "pipe", TCC_OPTION_pipe, 0},
     { "E", TCC_OPTION_E, 0},
     { "MD", TCC_OPTION_MD, 0},
+    { "MMD", TCC_OPTION_MD, 0},
     { "MF", TCC_OPTION_MF, TCC_OPTION_HAS_ARG },
+    { "MP", TCC_OPTION_MP, 0},
+    { "MT", TCC_OPTION_MT, TCC_OPTION_HAS_ARG },
     { "x", TCC_OPTION_x, TCC_OPTION_HAS_ARG },
     { "ar", TCC_OPTION_ar, 0},
 #ifdef TCC_TARGET_PE
@@ -1867,6 +1873,12 @@ reparse:
             break;
         case TCC_OPTION_MF:
             s->deps_outfile = tcc_strdup(optarg);
+            break;
+        case TCC_OPTION_MP:
+            s->deps_phony = 1;
+            break;
+        case TCC_OPTION_MT:
+            s->deps_target = tcc_strdup(optarg);
             break;
         case TCC_OPTION_dumpversion:
             printf ("%s\n", TCC_VERSION);

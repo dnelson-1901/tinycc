@@ -377,6 +377,13 @@ Generate makefile fragment with dependencies.
 @item -MF depfile
 Use @file{depfile} as output for -MD.
 
+@item -MP
+Generate a phony target for each dependency other than the main file.
+
+@item -MT target
+Use @file{depfile} as the target for the dependency instead of calculating
+one from the input filename.
+
 @item -print-search-dirs
 Print the configured installation directory and a list of library
 and include directories tcc will search.

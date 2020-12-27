@@ -72,6 +72,8 @@ static const char help[] =
     "  -Bdir        set tcc's private include/library dir\n"
     "  -MD          generate dependency file for make\n"
     "  -MF file     specify dependency file name\n"
+    "  -MP          generate phonies\n"
+    "  -MT target   specify dependency target name\n"
 #if defined(TCC_TARGET_I386) || defined(TCC_TARGET_X86_64)
     "  -m32/64      defer to i386/x86_64 cross compiler\n"
 #endif

@@ -535,7 +535,7 @@ ST_FUNC void gen_makedeps(TCCState *s1, const char *target, const char *filename
     depout = fopen(filename, "w");
     if (!depout)
         tcc_error("could not open '%s'", filename);
-    fprintf(depout, "%s:", target);
+    fprintf(depout, "%s:", s1->deps_target ?: target);
     for (i = 0; i<s1->nb_target_deps; ++i) {
         for (k = 0; k < i; ++k)
             if (0 == strcmp(s1->target_deps[i], s1->target_deps[k]))
@@ -544,6 +544,15 @@ ST_FUNC void gen_makedeps(TCCState *s1, const char *target, const char *filename
     next:;
     }
     fprintf(depout, "\n");
+    if (s1->deps_phony) {
+      for (i = 1; i<s1->nb_target_deps; ++i) {
+          for (k = 0; k < i; ++k)
+              if (0 == strcmp(s1->target_deps[i], s1->target_deps[k]))
+                  goto nextp;
+          fprintf(depout, "%s:\n", s1->target_deps[i]);
+      nextp:;
+      }
+    }
     fclose(depout);
 }
 

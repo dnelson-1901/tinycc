@@ -962,6 +962,8 @@ struct TCCState {
     unsigned char do_bench; /* option -bench */
     int gen_deps; /* option -MD  */
     char *deps_outfile; /* option -MF */
+    char *deps_target; /* option -MT */
+    int deps_phony; /* option -MP */
     int argc;
     char **argv;
 };
