@@ -1339,6 +1339,8 @@ static int tcc_set_linker(TCCState *s, const char *option)
             ignoring = 1;
         } else if (link_option(option, "export-all-symbols", &p)) {
             s->rdynamic = 1;
+        } else if (link_option(option, "E", &p)) {
+            s->rdynamic = 1;
         } else if (link_option(option, "export-dynamic", &p)) {
             s->rdynamic = 1;
         } else if (link_option(option, "rpath=", &p)) {
@@ -1348,6 +1350,8 @@ static int tcc_set_linker(TCCState *s, const char *option)
         } else if (link_option(option, "section-alignment=", &p)) {
             s->section_align = strtoul(p, &end, 16);
         } else if (link_option(option, "soname=", &p)) {
+            copy_linker_arg(&s->soname, p, 0);
+        } else if (link_option(option, "h", &p)) {
             copy_linker_arg(&s->soname, p, 0);
 #ifdef TCC_TARGET_PE
         } else if (link_option(option, "large-address-aware", &p)) {
