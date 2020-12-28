@@ -1,3 +1,6 @@
+ifeq ":" "::" # nonsense (but valid) line for make, conditional for gmake
+.error Use gmake
+endif
 # --------------------------------------------------------------------------
 #
 # Tiny C Compiler Makefile
