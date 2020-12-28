@@ -1221,13 +1221,20 @@ static int strstart(const char *val, const char **str)
     return 1;
 }
 
-/* Like strstart, but automatically takes into account that ld options can
+/* Like strstart, but automatically takes into account rules for ld options:
  *
- * - start with double or single dash (e.g. '--soname' or '-soname')
- * - arguments can be given as separate or after '=' (e.g. '-Wl,-soname,x.so'
- *   or '-Wl,-soname=x.so')
+ * - they may start with double or single dash (e.g. '--soname' or '-soname')
+ * - arguments can always be given as a separate field, directly after a
+ *   single-letter option, or with '=' after a long option (e.g. '-Wl,-hx.so',
+ *   '-Wl,-h,x.so', '-Wl,-soname,x.so' or '-Wl,-soname=x.so')
  *
- * you provide `val` always in 'option[=]' form (no leading -)
+ * val may start with '?' to indicate theat both the plain and 'no-' forms
+ * of the option are accepted.  the negative form changes the return value
+ * to -1 on a match.
+ *
+ * val may end with '=' to indicate that the option takes an argument.
+ *
+ * provide `val` always in '[?]option[=]' form (no leading -)
  */
 static int link_option(const char *str, const char *val, const char **ptr)
 {
@@ -1244,6 +1251,7 @@ static int link_option(const char *str, const char *val, const char **ptr)
     p = str;
     q = val;
 
+    /* check for no- form of the option */
     ret = 1;
     if (q[0] == '?') {
         ++q;
@@ -1258,13 +1266,19 @@ static int link_option(const char *str, const char *val, const char **ptr)
         q++;
     }
 
-    /* '=' near eos means ',' or '=' is ok */
+    /* if we're looking for an argument, ',' or '=' is ok */
     if (*q == '=') {
         if (*p == 0)
             *ptr = p;
-        if (*p != ',' && *p != '=')
+        /* long option - next char must be ',' or '=' */
+        if (val[1] != '=' && *p != ',' && *p != '=')
             return 0;
-        p++;
+        /* single-letter option - next char must not be nul */
+        if (val[1] == '=' && *p == 0)
+            return 0;
+        /* skip ',' or '=' as long as it's not a single-letter option */
+        if (val[1] != '=')
+            p++;
     } else if (*p) {
         return 0;
     }
@@ -1336,7 +1350,8 @@ static int tcc_set_linker(TCCState *s, const char *option)
 
         } else if (link_option(option, "as-needed", &p)) {
             ignoring = 1;
-        } else if (link_option(option, "O", &p)) {
+        } else if (link_option(option, "O=", &p)) {
+            skip_linker_arg(&p);
             ignoring = 1;
         } else if (link_option(option, "export-all-symbols", &p)) {
             s->rdynamic = 1;
@@ -1346,13 +1361,15 @@ static int tcc_set_linker(TCCState *s, const char *option)
             s->rdynamic = 1;
         } else if (link_option(option, "rpath=", &p)) {
             copy_linker_arg(&s->rpath, p, ':');
+        } else if (link_option(option, "R=", &p)) {
+            copy_linker_arg(&s->rpath, p, ':');
         } else if (link_option(option, "enable-new-dtags", &p)) {
             s->enable_new_dtags = 1;
         } else if (link_option(option, "section-alignment=", &p)) {
             s->section_align = strtoul(p, &end, 16);
         } else if (link_option(option, "soname=", &p)) {
             copy_linker_arg(&s->soname, p, 0);
-        } else if (link_option(option, "h", &p)) {
+        } else if (link_option(option, "h=", &p)) {
             copy_linker_arg(&s->soname, p, 0);
 #ifdef TCC_TARGET_PE
         } else if (link_option(option, "large-address-aware", &p)) {

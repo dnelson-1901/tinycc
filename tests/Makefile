@@ -19,6 +19,7 @@ TESTS = \
  abitest \
  asm-c-connect-test \
  vla_test-run \
+ args-test \
  cross-test \
  tests2-dir \
  pp-dir
@@ -287,6 +288,10 @@ cross-%.test :
 	@echo ------------ $@ ------------
 	$(TOP)/$*-tcc$(EXESUF) -v $(TCCFLAGS-$(if $(findstring win,$*),win,unx))\
 	    -c $(TOPSRC)/examples/ex3.c
+
+args-test :
+	@echo ------------ $@ ------------
+	$(TOPSRC)/tests/args-test.sh $(TCC)
 
 # targets for development
 %.bin: %.c tcc
