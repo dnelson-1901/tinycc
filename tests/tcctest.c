@@ -3232,8 +3232,8 @@ static __inline__ void sigdelset1(unsigned int *set, int _sig)
 	asm("btrl %1,%0" : "=m"(*set) : "Ir"(_sig - 1) : "cc", "flags");
 }
 
-#ifdef __clang__
-/* clang's inline asm is uncapable of 'xchgb %b0,%h0' */
+#if defined(__clang__) && (__clang_major__ < 9)
+/* older clang's inline asm is uncapable of 'xchgb %b0,%h0' */
 static __inline__ __const__ unsigned int swab32(unsigned int x)
 {
         return ((x >> 24) & 0xff) |
