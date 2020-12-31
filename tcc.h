@@ -211,6 +211,11 @@ extern long double strtold (const char *__nptr, char **__endptr);
 # define ELF_OBJ_ONLY /* create elf .o but native executables */
 #endif
 
+/* No ten-byte long doubles on window except in cross-compilers made by GCC */
+#if defined TCC_TARGET_PE || (defined _WIN32 && !defined __GNUC__)
+# define TCC_USING_DOUBLE_FOR_LDOUBLE 1
+#endif
+
 /* ------------ path configuration ------------ */
 
 #ifndef CONFIG_SYSROOT
@@ -409,7 +414,7 @@ extern long double strtold (const char *__nptr, char **__endptr);
 # define ElfW_Rel ElfW(Rela)
 # define SHT_RELX SHT_RELA
 # define REL_SECTION_FMT ".rela%s"
-# define RELPLT_SECTION_FMT ".rel.plt"
+# define RELPLT_SECTION_FMT ".rela.plt"
 #else
 # define ELFCLASSW ELFCLASS32
 # define ElfW(type) Elf##32##_##type
@@ -872,7 +877,7 @@ struct TCCState {
     Section *plt;
 
     /* predefined sections */
-    Section *text_section, *data_section, *bss_section;
+    Section *text_section, *data_section, *data_ro_section, *bss_section;
     Section *common_section;
     Section *cur_text_section; /* current section where function code is generated */
 #ifdef CONFIG_TCC_BCHECK
@@ -1622,7 +1627,7 @@ ST_FUNC void relocate_plt(TCCState *s1);
 ST_FUNC void relocate(TCCState *s1, ElfW_Rel *rel, int type, unsigned char *ptr, addr_t addr, addr_t val);
 
 /* ------------ xxx-gen.c ------------ */
-
+ST_DATA const char *target_machine_defs;
 ST_DATA const int reg_classes[NB_REGS];
 
 ST_FUNC void gsym_addr(int t, int a);
@@ -1819,6 +1824,7 @@ ST_FUNC void gen_makedeps(TCCState *s, const char *target, const char *filename)
 
 #define text_section        TCC_STATE_VAR(text_section)
 #define data_section        TCC_STATE_VAR(data_section)
+#define data_ro_section     TCC_STATE_VAR(data_ro_section)
 #define bss_section         TCC_STATE_VAR(bss_section)
 #define common_section      TCC_STATE_VAR(common_section)
 #define cur_text_section    TCC_STATE_VAR(cur_text_section)

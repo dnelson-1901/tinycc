@@ -81,6 +81,11 @@ enum {
 #define USING_GLOBALS
 #include "tcc.h"
 
+ST_DATA const char *target_machine_defs =
+    "__i386__\0"
+    "__i386\0"
+    ;
+
 /* define to 1/0 to [not] have EBX as 4th register */
 #define USE_EBX 0
 
@@ -374,7 +379,7 @@ static uint8_t fastcallw_regs[2] = { TREG_ECX, TREG_EDX };
    returning via struct pointer. */
 ST_FUNC int gfunc_sret(CType *vt, int variadic, CType *ret, int *ret_align, int *regsize)
 {
-#ifdef TCC_TARGET_PE
+#if defined(TCC_TARGET_PE) || TARGETOS_FreeBSD
     int size, align;
     *ret_align = 1; // Never have to re-align return values for x86
     *regsize = 4;
@@ -496,7 +501,7 @@ ST_FUNC void gfunc_call(int nb_args)
             args_size -= 4;
         }
     }
-#ifndef TCC_TARGET_PE
+#if !defined(TCC_TARGET_PE) && !TARGETOS_FreeBSD
     else if ((vtop->type.ref->type.t & VT_BTYPE) == VT_STRUCT)
         args_size -= 4;
 #endif
@@ -546,7 +551,7 @@ ST_FUNC void gfunc_prolog(Sym *func_sym)
     func_sub_sp_offset = ind;
     /* if the function returns a structure, then add an
        implicit pointer parameter */
-#ifdef TCC_TARGET_PE
+#if defined(TCC_TARGET_PE) || TARGETOS_FreeBSD
     size = type_size(&func_vt,&align);
     if (((func_vt.t & VT_BTYPE) == VT_STRUCT)
         && (size > 8 || (size & (size - 1)))) {
@@ -587,7 +592,7 @@ ST_FUNC void gfunc_prolog(Sym *func_sym)
     /* pascal type call or fastcall ? */
     if (func_call == FUNC_STDCALL || func_call == FUNC_FASTCALLW)
         func_ret_sub = addr - 8;
-#ifndef TCC_TARGET_PE
+#if !defined(TCC_TARGET_PE) && !TARGETOS_FreeBSD
     else if (func_vc)
         func_ret_sub = 4;
 #endif
