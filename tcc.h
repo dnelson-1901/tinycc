@@ -201,9 +201,12 @@ extern long double strtold (const char *__nptr, char **__endptr);
 # endif
 #endif
 
-#if (TARGETOS_OpenBSD || TARGETOS_FreeBSD || TARGETOS_NetBSD || TARGETOS_FreeBSD_kernel)
+#if defined TARGETOS_OpenBSD \
+    || defined TARGETOS_FreeBSD \
+    || defined TARGETOS_NetBSD \
+    || defined TARGETOS_FreeBSD_kernel
 # define TARGETOS_BSD 1
-#elif !(TCC_TARGET_PE || TCC_TARGET_MACHO)
+#elif !(defined TCC_TARGET_PE || defined TCC_TARGET_MACHO)
 # define TARGETOS_Linux 1
 #endif
 
@@ -1682,10 +1685,12 @@ static inline void add64le(unsigned char *p, int64_t x) {
 }
 
 /* ------------ i386-gen.c ------------ */
-#if defined TCC_TARGET_I386 || defined TCC_TARGET_X86_64
+#if defined TCC_TARGET_I386 || defined TCC_TARGET_X86_64 || defined TCC_TARGET_ARM
 ST_FUNC void g(int c);
 ST_FUNC void gen_le16(int c);
 ST_FUNC void gen_le32(int c);
+#endif
+#if defined TCC_TARGET_I386 || defined TCC_TARGET_X86_64
 ST_FUNC void gen_addr32(int r, Sym *sym, int c);
 ST_FUNC void gen_addrpc32(int r, Sym *sym, int c);
 ST_FUNC void gen_cvt_csti(int t);
