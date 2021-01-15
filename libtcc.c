@@ -1106,13 +1106,13 @@ ST_FUNC int tcc_add_crt(TCCState *s1, const char *filename)
 
 /* OpenBSD only has suffixed .so files; e.g., libc.so.96.0 */
 /* So we must process that */
-#if defined TARGETOS_OpenBSD
+#if defined TARGETOS_OpenBSD && !defined _WIN32/* no dirent */
 #include <dirent.h>
 ST_FUNC char *tcc_openbsd_library_soversion(TCCState *s, const char *libraryname)
 {
     DIR *dirp;
     struct dirent *dp;
-    const char *e;
+    char *e;
     char **libpaths, *t, *u, *v;
     char soname[1024];
     long long maj, min, tmaj, tmin;
@@ -1135,16 +1135,18 @@ ST_FUNC char *tcc_openbsd_library_soversion(TCCState *s, const char *libraryname
                 u = strrchr(t, '.');
                 *u = '\0';
 
-                tmin = strtonum(u + 1, 0, LLONG_MAX, &e);
-                if (e != NULL) {
+                tmin = strtoll(u + 1, &e, 10);
+
+                if (*e != 0) {
                     tcc_free(t);
                     t = NULL;
                     continue;
                 }
 
                 v = strrchr(t, '.');
-                tmaj = strtonum(v + 1, 0, LLONG_MAX, &e);
-                if (e != NULL) {
+                tmaj = strtoll(v + 1, &e, 10);
+
+                if (*e != 0) {
                     tcc_free(t);
                     t = NULL;
                     continue;
@@ -1184,7 +1186,7 @@ LIBTCCAPI int tcc_add_library(TCCState *s, const char *libraryname)
 #elif defined TCC_TARGET_MACHO
     const char *libs[] = { "%s/lib%s.dylib", "%s/lib%s.a", NULL };
     const char **pp = s->static_link ? libs + 1 : libs;
-#elif defined TARGETOS_OpenBSD
+#elif defined TARGETOS_OpenBSD && !defined _WIN32
     const char *libs[] = { s->static_link
                            ? NULL
                            /* find exact versionned .so.x.y name as no
@@ -1499,6 +1501,8 @@ static int tcc_set_linker(TCCState *s, const char *option)
                 s->filetype |= AFF_WHOLE_ARCHIVE;
             else
                 s->filetype &= ~AFF_WHOLE_ARCHIVE;
+        } else if (link_option(option, "z=", &p)) {
+            ignoring = 1;
         } else if (p) {
             return 0;
         } else {

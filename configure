@@ -140,7 +140,7 @@ for opt do
   ;;
   --disable-rpath) confvars="$confvars rpath=no"
   ;;
-  --strip-binaries) confvars="$confvars strip"
+  --strip-binaries) echo deprecate, use 'make install-strip' to strip binaries
   ;;
   --debug) confvars="$confvars strip=no"
   ;;
