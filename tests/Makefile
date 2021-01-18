@@ -294,6 +294,7 @@ CROSS-TGTS = \
  x86_64-OpenBSD \
  arm-fpa \
  arm-eabihf \
+ arm-NetBSD \
  arm-wince \
  arm64 \
  arm64-FreeBSD \

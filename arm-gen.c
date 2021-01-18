@@ -198,7 +198,8 @@ ST_FUNC void arm_init(struct TCCState *s)
 
     float_abi = s->float_abi;
 #ifndef TCC_ARM_HARDFLOAT
-# warning "soft float ABI currently not supported: default to softfp"
+// XXX: Works on OpenBSD
+// # warning "soft float ABI currently not supported: default to softfp"
 #endif
 }
 #else
@@ -1203,7 +1204,10 @@ again:
             o(0xE28D0000|(intr(r)<<12)|padding); /* add r, sp, padding */
             vset(&vtop->type, r | VT_LVAL, 0);
             vswap();
+	    /* XXX: optimize. Save all register because memcpy can use them */
+	    o(0xED2D0A00|(0&1)<<22|(0>>1)<<12|16); /* vpush {s0-s15} */
             vstore(); /* memcpy to current sp + potential padding */
+	    o(0xECBD0A00|(0&1)<<22|(0>>1)<<12|16); /* vpop {s0-s15} */
 
             /* Homogeneous float aggregate are loaded to VFP registers
                immediately since there is no way of loading data in multiple
@@ -1717,8 +1721,12 @@ void gen_opi(int op)
 	uint32_t x;
 	x=stuff_const(opc|0x2000000|(c<<16),vtop->c.i);
 	if(x) {
-	  r=intr(vtop[-1].r=get_reg_ex(RC_INT,regmask(vtop[-1].r)));
-	  o(x|(r<<12));
+	  if ((x & 0xfff00000) == 0xe3500000)   // cmp rx,#c
+	    o(x);
+	  else {
+	    r=intr(vtop[-1].r=get_reg_ex(RC_INT,regmask(vtop[-1].r)));
+	    o(x|(r<<12));
+	  }
 	  goto done;
 	}
       }
@@ -1728,8 +1736,12 @@ void gen_opi(int op)
         c=intr(gv(RC_INT));
         vswap();
       }
-      r=intr(vtop[-1].r=get_reg_ex(RC_INT,two2mask(vtop->r,vtop[-1].r)));
-      o(opc|(c<<16)|(r<<12)|fr);
+      if ((opc & 0xfff00000) == 0xe1500000) // cmp rx,ry
+	o(opc|(c<<16)|fr);
+      else {
+        r=intr(vtop[-1].r=get_reg_ex(RC_INT,two2mask(vtop->r,vtop[-1].r)));
+        o(opc|(c<<16)|(r<<12)|fr);
+      }
 done:
       vtop--;
       if (op >= TOK_ULT && op <= TOK_GT)
