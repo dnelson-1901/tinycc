@@ -781,6 +781,8 @@ struct TCCState {
     /* compile with built-in memory and bounds checker */
     unsigned char do_bounds_check;
 #endif
+    unsigned char test_coverage;  /* generate test coverage code */
+
 #ifdef TCC_TARGET_ARM
     enum float_abi float_abi; /* float ABI of the generated code*/
 #endif
@@ -894,6 +896,8 @@ struct TCCState {
     Section *bounds_section; /* contains global data bound description */
     Section *lbounds_section; /* contains local data bound description */
 #endif
+    /* test coverage */
+    Section *tcov_section;
     /* symbol sections */
     Section *symtab_section;
     /* debug sections */
@@ -1446,6 +1450,7 @@ ST_DATA Sym *define_stack;
 ST_DATA CType int_type, func_old_type, char_pointer_type;
 ST_DATA SValue *vtop;
 ST_DATA int rsym, anon_sym, ind, loc;
+ST_DATA char debug_modes;
 
 ST_DATA int const_wanted; /* true if constant wanted */
 ST_DATA int nocode_wanted; /* true if no code generation wanted for an expression */
@@ -1460,9 +1465,7 @@ ST_FUNC void tcc_debug_end(TCCState *s1);
 ST_FUNC void tcc_debug_bincl(TCCState *s1);
 ST_FUNC void tcc_debug_eincl(TCCState *s1);
 ST_FUNC void tcc_debug_putfile(TCCState *s1, const char *filename);
-ST_FUNC void tcc_debug_funcstart(TCCState *s1, Sym *sym);
-ST_FUNC void tcc_debug_funcend(TCCState *s1, int size);
-ST_FUNC void tcc_debug_line(TCCState *s1);
+ST_FUNC void tcc_add_tcov(TCCState *s1);
 
 ST_FUNC void tccgen_init(TCCState *s1);
 ST_FUNC int tccgen_compile(TCCState *s1);
@@ -1702,6 +1705,7 @@ ST_FUNC void gen_le32(int c);
 ST_FUNC void gen_addr32(int r, Sym *sym, int c);
 ST_FUNC void gen_addrpc32(int r, Sym *sym, int c);
 ST_FUNC void gen_cvt_csti(int t);
+ST_FUNC void gen_increment_tcov (SValue *sv);
 #endif
 
 /* ------------ x86_64-gen.c ------------ */
@@ -1721,6 +1725,7 @@ ST_FUNC void gen_cvt_csti(int t);
 PUB_FUNC const char *default_elfinterp(struct TCCState *s);
 #endif
 ST_FUNC void arm_init(struct TCCState *s);
+ST_FUNC void gen_increment_tcov (SValue *sv);
 #endif
 
 /* ------------ arm64-gen.c ------------ */
@@ -1732,6 +1737,7 @@ ST_FUNC void gen_va_arg(CType *t);
 ST_FUNC void gen_clear_cache(void);
 ST_FUNC void gen_cvt_sxtw(void);
 ST_FUNC void gen_cvt_csti(int t);
+ST_FUNC void gen_increment_tcov (SValue *sv);
 #endif
 
 /* ------------ riscv64-gen.c ------------ */
@@ -1741,6 +1747,7 @@ ST_FUNC void gen_opl(int op);
 ST_FUNC void gen_va_start(void);
 ST_FUNC void arch_transfer_ret_regs(int);
 ST_FUNC void gen_cvt_sxtw(void);
+ST_FUNC void gen_increment_tcov (SValue *sv);
 #endif
 
 /* ------------ c67-gen.c ------------ */
@@ -1843,6 +1850,7 @@ ST_FUNC void gen_makedeps(TCCState *s, const char *target, const char *filename)
 #define cur_text_section    TCC_STATE_VAR(cur_text_section)
 #define bounds_section      TCC_STATE_VAR(bounds_section)
 #define lbounds_section     TCC_STATE_VAR(lbounds_section)
+#define tcov_section        TCC_STATE_VAR(tcov_section)
 #define symtab_section      TCC_STATE_VAR(symtab_section)
 #define stab_section        TCC_STATE_VAR(stab_section)
 #define stabstr_section     stab_section->link

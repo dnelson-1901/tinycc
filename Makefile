@@ -15,8 +15,6 @@ ifeq ($(findstring $(MAKECMDGOALS),clean distclean),)
  include $(TOP)/config.mak
 endif
 
-CONFIG_strip = no
-
 ifeq (-$(GCC_MAJOR)-$(findstring $(GCC_MINOR),56789)-,-4--)
  CFLAGS += -D_FORTIFY_SOURCE=0
 endif
@@ -111,7 +109,7 @@ DEF-arm-vfp        = -DTCC_TARGET_ARM -DTCC_ARM_VFP
 DEF-arm-eabi       = -DTCC_TARGET_ARM -DTCC_ARM_VFP -DTCC_ARM_EABI
 DEF-arm-eabihf     = $(DEF-arm-eabi) -DTCC_ARM_HARDFLOAT
 DEF-arm            = $(DEF-arm-eabihf)
-DEF-arm-NetBSD     = $(DEF-arm-eabihf) -DTARGETOS_FreeBSD
+DEF-arm-NetBSD     = $(DEF-arm-eabihf) -DTARGETOS_NetBSD
 DEF-arm-wince      = $(DEF-arm-eabihf) -DTCC_TARGET_PE
 DEF-arm64          = -DTCC_TARGET_ARM64
 DEF-arm64-FreeBSD  = $(DEF-arm64) -DTARGETOS_FreeBSD
@@ -224,7 +222,7 @@ $(TCC_FILES) : DEFINES += -DONE_SOURCE=0
 $(X)tccpp.o : $(TCCDEFS_H)
 endif
 
-ifeq ($(CONFIG_strip),no)
+ifeq ($(CONFIG_debug),yes)
 CFLAGS += -g
 LDFLAGS += -g
 else
@@ -339,11 +337,12 @@ IR = $(IM) mkdir -p $2 && cp -r $1/. $2
 IM = $(info -> $2 : $1)@
 
 B_O = bcheck.o bt-exe.o bt-log.o bt-dll.o
+T_O = tcov.o
 
 # install progs & libs
 install-unx:
 	$(call IBw,$(PROGS) $(PROGS_CROSS),"$(bindir)")
-	$(call IFw,$(LIBTCC1) $(B_O) $(LIBTCC1_U),"$(tccdir)")
+	$(call IFw,$(LIBTCC1) $(B_O) $(T_O) $(LIBTCC1_U),"$(tccdir)")
 	$(call IF,$(TOPSRC)/include/*.h $(TOPSRC)/tcclib.h,"$(tccdir)/include")
 	$(call $(if $(findstring .so,$(LIBTCC)),IBw,IFw),$(LIBTCC),"$(libdir)")
 	$(call IF,$(TOPSRC)/libtcc.h,"$(includedir)")
@@ -368,7 +367,7 @@ uninstall-unx:
 install-win:
 	$(call IBw,$(PROGS) $(PROGS_CROSS) $(subst libtcc.a,,$(LIBTCC)),"$(bindir)")
 	$(call IF,$(TOPSRC)/win32/lib/*.def,"$(tccdir)/lib")
-	$(call IFw,libtcc1.a $(B_O) $(LIBTCC1_W),"$(tccdir)/lib")
+	$(call IFw,libtcc1.a $(B_O) $(T_O) $(LIBTCC1_W),"$(tccdir)/lib")
 	$(call IF,$(TOPSRC)/include/*.h $(TOPSRC)/tcclib.h,"$(tccdir)/include")
 	$(call IR,$(TOPSRC)/win32/include,"$(tccdir)/include")
 	$(call IR,$(TOPSRC)/win32/examples,"$(tccdir)/examples")

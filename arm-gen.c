@@ -541,8 +541,13 @@ static int negcc(int cc)
    Use relative/got addressing to avoid setting DT_TEXTREL */
 static void load_value(SValue *sv, int r)
 {
-    o(0xE59F0000|(intr(r)<<12));
-    o(0xEA000000);
+    o(0xE59F0000|(intr(r)<<12)); /* ldr r, [pc] */
+    o(0xEA000000); /* b $+4 */
+#ifndef CONFIG_TCC_PIE
+    if(sv->r & VT_SYM)
+        greloc(cur_text_section, sv->sym, ind, R_ARM_ABS32);
+    o(sv->c.i);
+#else
     if(sv->r & VT_SYM) {
 	if (sv->sym->type.t & VT_STATIC) {
             greloc(cur_text_section, sv->sym, ind, R_ARM_REL32);
@@ -561,6 +566,7 @@ static void load_value(SValue *sv, int r)
     }
     else
         o(sv->c.i);
+#endif
 }
 
 /* load 'r' from value 'sv' */
@@ -1731,11 +1737,13 @@ void gen_opi(int op)
 	}
       }
       fr=intr(gv(RC_INT));
+#ifdef CONFIG_TCC_BCHECK
       if ((vtop[-1].r & VT_VALMASK) >= VT_CONST) {
         vswap();
         c=intr(gv(RC_INT));
         vswap();
       }
+#endif
       if ((opc & 0xfff00000) == 0xe1500000) // cmp rx,ry
 	o(opc|(c<<16)|fr);
       else {
@@ -1761,11 +1769,13 @@ done:
 	o(opc|r|(c<<7)|(fr<<12));
       } else {
         fr=intr(gv(RC_INT));
+#ifdef CONFIG_TCC_BCHECK
         if ((vtop[-1].r & VT_VALMASK) >= VT_CONST) {
           vswap();
           r=intr(gv(RC_INT));
           vswap();
         }
+#endif
 	c=intr(vtop[-1].r=get_reg_ex(RC_INT,two2mask(vtop->r,vtop[-1].r)));
 	o(opc|r|(c<<12)|(fr<<8)|0x10);
       }
@@ -1877,12 +1887,14 @@ void gen_opf(int op)
     r2=gv(RC_FLOAT);
     x|=vfpr(r2)<<16;
     r|=regmask(r2);
+#ifdef CONFIG_TCC_BCHECK
     if ((vtop[-1].r & VT_VALMASK) >= VT_CONST) {
       vswap();
       r=gv(RC_FLOAT);
       vswap();
       x=(x&~0xf)|vfpr(r);
     }
+#endif
   }
   vtop->r=get_reg_ex(RC_FLOAT,r);
   if(!fneg)
@@ -1965,11 +1977,13 @@ void gen_opf(int op)
 	r2=c2&0xf;
       } else {
 	r2=fpr(gv(RC_FLOAT));
+#ifdef CONFIG_TCC_BCHECK
         if ((vtop[-1].r & VT_VALMASK) >= VT_CONST) {
           vswap();
           r=fpr(gv(RC_FLOAT));
           vswap();
         }
+#endif
       }
       break;
     case '-':
@@ -1991,11 +2005,13 @@ void gen_opf(int op)
 	r=fpr(gv(RC_FLOAT));
 	vswap();
 	r2=fpr(gv(RC_FLOAT));
+#ifdef CONFIG_TCC_BCHECK
         if ((vtop[-1].r & VT_VALMASK) >= VT_CONST) {
           vswap();
           r=fpr(gv(RC_FLOAT));
           vswap();
         }
+#endif
       }
       break;
     case '*':
@@ -2010,11 +2026,13 @@ void gen_opf(int op)
 	r2=c2;
       else {
 	r2=fpr(gv(RC_FLOAT));
+#ifdef CONFIG_TCC_BCHECK
         if ((vtop[-1].r & VT_VALMASK) >= VT_CONST) {
           vswap();
           r=fpr(gv(RC_FLOAT));
           vswap();
         }
+#endif
       }
       x|=0x100000; // muf
       break;
@@ -2036,11 +2054,13 @@ void gen_opf(int op)
 	r=fpr(gv(RC_FLOAT));
 	vswap();
 	r2=fpr(gv(RC_FLOAT));
+#ifdef CONFIG_TCC_BCHECK
         if ((vtop[-1].r & VT_VALMASK) >= VT_CONST) {
           vswap();
           r=fpr(gv(RC_FLOAT));
           vswap();
         }
+#endif
       }
       break;
     default:
@@ -2093,11 +2113,13 @@ void gen_opf(int op)
 	  r2=c2&0xf;
 	} else {
 	  r2=fpr(gv(RC_FLOAT));
+#ifdef CONFIG_TCC_BCHECK
           if ((vtop[-1].r & VT_VALMASK) >= VT_CONST) {
             vswap();
             r=fpr(gv(RC_FLOAT));
             vswap();
           }
+#endif
 	}
         --vtop;
         vset_VT_CMP(op);
@@ -2275,6 +2297,29 @@ void gen_cvt_ftof(int t)
   /* all we have to do on i386 and FPA ARM is to put the float in a register */
   gv(RC_FLOAT);
 #endif
+}
+
+/* increment tcov counter */
+ST_FUNC void gen_increment_tcov (SValue *sv)
+{
+  int r1, r2;
+
+  vpushv(sv);
+  vtop->r = r1 = get_reg(RC_INT);
+  r2 = get_reg(RC_INT);
+  o(0xE59F0000 | (intr(r1)<<12)); // ldr r1,[pc]
+  o(0xEA000000); // b $+4
+  greloc(cur_text_section, sv->sym, ind, R_ARM_REL32);
+  o(-12);
+  o(0xe080000f | (intr(r1)<<16) | (intr(r1)<<12)); // add r1,r1,pc
+  o(0xe5900000 | (intr(r1)<<16) | (intr(r2)<<12)); // ldr r2, [r1]
+  o(0xe2900001 | (intr(r2)<<16) | (intr(r2)<<12)); // adds r2, r2, #1
+  o(0xe5800000 | (intr(r1)<<16) | (intr(r2)<<12)); // str r2, [r1]
+  o(0xe2800004 | (intr(r1)<<16) | (intr(r1)<<12)); // add r1, r1, #4
+  o(0xe5900000 | (intr(r1)<<16) | (intr(r2)<<12)); // ldr r2, [r1]
+  o(0xe2a00000 | (intr(r2)<<16) | (intr(r2)<<12)); // adc r2, r2, #0
+  o(0xe5800000 | (intr(r1)<<16) | (intr(r2)<<12)); // str r2, [r1]
+  vpop();
 }
 
 /* computed goto support */

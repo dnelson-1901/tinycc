@@ -5,8 +5,19 @@ set -e
 # Note: "{r3}" is definitely different--but would complicate the assembler.
 
 state="`mktemp -d`"
-cat ../arm-tok.h |grep DEF_ASM_CONDED |grep -v '#define' |grep -v '/[*]' |sed -e 's;DEF_ASM_CONDED.\(.*\).$;\1;'| grep -v 'not useful' | while read s
+cat ../arm-tok.h |grep DEF_ASM |grep -v 'not useful' |grep -v '#define' |grep -v '/[*]' |sed -e 's;^[ ]*DEF_ASM[^(]*(\(.*\)).*$;\1;' | egrep -v '^((r|c|p|s|d)[0-9]+|fp|ip|sp|lr|pc|asl)$' | while read s
 do
+	as_opts=""
+	if [ "${s#v}" != "${s}" ]
+	then
+		if grep -q "CONFIG_arm_vfp=yes" ../config.mak
+		then
+			as_opts="${as_opts} -mfpu=vfp"
+		else
+			echo "note: skipping VFP instruction: $s (because VFP is disabled)">&2
+			continue
+		fi
+	fi
 	ok=0
 	for args in "r3, r4, r5, r6" \
 	            "r3, r4, r5" \
@@ -56,6 +67,8 @@ do
 	            "{r3,r5,r4}" \
 	            "r2!, {r3,r4,r5}" \
 	            "r2!, {r3,r5,r4}" \
+	            "r2, {r3,r4,r5}" \
+	            "r2, {r3,r5,r4}" \
 	            "r2, [r3, r4]" \
 	            "r2, [r3, r4]!" \
 	            "r2, [r3, -r4]" \
@@ -80,6 +93,10 @@ do
 	            "r2, [r3, #-0x45]" \
 	            "r2, r3, #4" \
 	            "r2, r3, #-4" \
+	            "p10, #7, c2, c0, c1, #4" \
+	            "p10, #7, r2, c0, c1, #4" \
+	            "p10, #0, c2, c0, c1, #4" \
+	            "p10, #0, r2, c0, c1, #4" \
 	            "r2, #4" \
 	            "r2, #-4" \
 	            "r2, #0xEFFF" \
@@ -87,8 +104,34 @@ do
 	            "r4, #0x0201" \
 	            "r4, #0xFFFFFF00" \
 	            "r2, #-4" \
+	            "p10, #7, c2, c0, c1, #4" \
+	            "p10, #7, r2, c0, c1, #4" \
 	            "#4" \
 	            "#-4" \
+                    "p5, c2, [r3]" \
+                    "p5, c3, [r4]" \
+                    "p5, c2, [r3, #4]" \
+                    "p5, c2, [r3, #-4]" \
+                    "p5, c2, [r3, #0x45]" \
+                    "p5, c2, [r3, #-0x45]" \
+                    "s2, [r3]" \
+                    "s3, [r4]" \
+                    "s2, [r3, #4]" \
+                    "s2, [r3, #-4]" \
+                    "s2, [r3, #0x45]" \
+                    "s2, [r3, #-0x45]" \
+                    "r1, {d3-d4}" \
+                    "r1!, {d3-d4}" \
+                    "r2, {d4-d15}" \
+                    "r3!, {d4-d15}" \
+                    "r3!, {d4}" \
+                    "r2, {s4-s31}" \
+                    "r3!, {s4}" \
+                    "{d3-d4}" \
+                    "{d4-d15}" \
+                    "{d4}" \
+                    "{s4-s31}" \
+                    "{s4}" \
 	            ""
 	do
 		#echo ".syntax unified" > a.s
@@ -97,7 +140,7 @@ do
 		tcc_object="${state}/tcc-$s $args.o"
 		expected="${state}/expected-$s $args"
 		got="${state}/got-$s $args"
-		if echo "$s $args" | "${CROSS_COMPILE}as" -mlittle-endian -o "${as_object}" - 2>"${err}"
+		if echo "$s $args" | "${CROSS_COMPILE}as" -mlittle-endian ${as_opts} -o "${as_object}" - 2>"${err}"
 		then
 			cat "${err}"
 			rm -f "${err}"

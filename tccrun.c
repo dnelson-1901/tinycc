@@ -183,7 +183,7 @@ LIBTCCAPI int tcc_run(TCCState *s1, int argc, char **argv)
 #ifdef CONFIG_TCC_BCHECK
         if (s1->do_bounds_check) {
             if ((p = tcc_get_symbol(s1, "__bound_init")))
-                ((void(*)(void*, int))p)(bounds_section->data, 1);
+                ((void(*)(addr_t, int))p)(bounds_section->sh_addr, 1);
         }
 #endif
         set_exception_handler();
@@ -737,6 +737,7 @@ static void set_exception_handler(void)
     struct sigaction sigact;
     /* install TCC signal handlers to print debug info on fatal
        runtime errors */
+    sigemptyset (&sigact.sa_mask);
     sigact.sa_flags = SA_SIGINFO | SA_RESETHAND;
 #if 0//def SIGSTKSZ // this causes signals not to work at all on some (older) linuxes
     sigact.sa_flags |= SA_ONSTACK;

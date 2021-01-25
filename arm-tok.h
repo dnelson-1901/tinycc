@@ -28,9 +28,109 @@
  DEF_ASM(lr) /* alias for r14 */
  DEF_ASM(pc) /* alias for r15 */
 
+ /* coprocessors */
+
+ DEF_ASM(p0)
+ DEF_ASM(p1)
+ DEF_ASM(p2)
+ DEF_ASM(p3)
+ DEF_ASM(p4)
+ DEF_ASM(p5)
+ DEF_ASM(p6)
+ DEF_ASM(p7)
+ DEF_ASM(p8)
+ DEF_ASM(p9)
+ DEF_ASM(p10)
+ DEF_ASM(p11)
+ DEF_ASM(p12)
+ DEF_ASM(p13)
+ DEF_ASM(p14)
+ DEF_ASM(p15)
+
+ /* coprocessor registers */
+
+ DEF_ASM(c0)
+ DEF_ASM(c1)
+ DEF_ASM(c2)
+ DEF_ASM(c3)
+ DEF_ASM(c4)
+ DEF_ASM(c5)
+ DEF_ASM(c6)
+ DEF_ASM(c7)
+ DEF_ASM(c8)
+ DEF_ASM(c9)
+ DEF_ASM(c10)
+ DEF_ASM(c11)
+ DEF_ASM(c12)
+ DEF_ASM(c13)
+ DEF_ASM(c14)
+ DEF_ASM(c15)
+
+ /* single-precision VFP registers */
+
+ DEF_ASM(s0)
+ DEF_ASM(s1)
+ DEF_ASM(s2)
+ DEF_ASM(s3)
+ DEF_ASM(s4)
+ DEF_ASM(s5)
+ DEF_ASM(s6)
+ DEF_ASM(s7)
+ DEF_ASM(s8)
+ DEF_ASM(s9)
+ DEF_ASM(s10)
+ DEF_ASM(s11)
+ DEF_ASM(s12)
+ DEF_ASM(s13)
+ DEF_ASM(s14)
+ DEF_ASM(s15)
+ DEF_ASM(s16)
+ DEF_ASM(s17)
+ DEF_ASM(s18)
+ DEF_ASM(s19)
+ DEF_ASM(s20)
+ DEF_ASM(s21)
+ DEF_ASM(s22)
+ DEF_ASM(s23)
+ DEF_ASM(s24)
+ DEF_ASM(s25)
+ DEF_ASM(s26)
+ DEF_ASM(s27)
+ DEF_ASM(s28)
+ DEF_ASM(s29)
+ DEF_ASM(s30)
+ DEF_ASM(s31)
+
+ /* double-precision VFP registers */
+
+ DEF_ASM(d0)
+ DEF_ASM(d1)
+ DEF_ASM(d2)
+ DEF_ASM(d3)
+ DEF_ASM(d4)
+ DEF_ASM(d5)
+ DEF_ASM(d6)
+ DEF_ASM(d7)
+ DEF_ASM(d8)
+ DEF_ASM(d9)
+ DEF_ASM(d10)
+ DEF_ASM(d11)
+ DEF_ASM(d12)
+ DEF_ASM(d13)
+ DEF_ASM(d14)
+ DEF_ASM(d15)
+
  /* data processing directives */
 
  DEF_ASM(asl)
+
+ /* instructions that have no condition code */
+
+ DEF_ASM(cdp2)
+ DEF_ASM(ldc2)
+ DEF_ASM(ldc2l)
+ DEF_ASM(stc2)
+ DEF_ASM(stc2l)
 
 #define ARM_INSTRUCTION_GROUP(tok) ((((tok) - TOK_ASM_nopeq) & 0xFFFFFFF0) + TOK_ASM_nopeq)
 
@@ -59,6 +159,7 @@
  DEF_ASM_CONDED(wfe)
  DEF_ASM_CONDED(wfi)
  DEF_ASM_CONDED(swi)
+ DEF_ASM_CONDED(svc)
 
  /* misc */
  DEF_ASM_CONDED(clz)
@@ -112,6 +213,11 @@
  DEF_ASM_CONDED(ldmdb)
  DEF_ASM_CONDED(stmib)
  DEF_ASM_CONDED(ldmib)
+
+ DEF_ASM_CONDED(ldc)
+ DEF_ASM_CONDED(ldcl)
+ DEF_ASM_CONDED(stc)
+ DEF_ASM_CONDED(stcl)
 
  /* instruction macros */
 
@@ -170,3 +276,21 @@
  DEF_ASM_CONDED(rors)
  DEF_ASM_CONDED(rrx)
  DEF_ASM_CONDED(rrxs)
+
+ DEF_ASM_CONDED(cdp)
+ DEF_ASM_CONDED(mcr)
+ DEF_ASM_CONDED(mrc)
+
+ // Floating point high-level instructions
+
+ DEF_ASM_CONDED(vldr)
+ DEF_ASM_CONDED(vstr)
+
+ DEF_ASM_CONDED(vpush)
+ DEF_ASM_CONDED(vpop)
+ DEF_ASM_CONDED(vldm)
+ DEF_ASM_CONDED(vldmia)
+ DEF_ASM_CONDED(vldmdb)
+ DEF_ASM_CONDED(vstm)
+ DEF_ASM_CONDED(vstmia)
+ DEF_ASM_CONDED(vstmdb)

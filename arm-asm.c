@@ -155,7 +155,7 @@ ST_FUNC void gen_expr32(ExprValue *pe)
 
 static uint32_t condition_code_of_token(int token) {
     if (token < TOK_ASM_nopeq) {
-        expect("instruction");
+        expect("condition-enabled instruction");
         return 0;
     } else
         return (token - TOK_ASM_nopeq) & 15;
@@ -163,6 +163,30 @@ static uint32_t condition_code_of_token(int token) {
 
 static void asm_emit_opcode(int token, uint32_t opcode) {
     gen_le32((condition_code_of_token(token) << 28) | opcode);
+}
+
+static void asm_emit_unconditional_opcode(uint32_t opcode) {
+    gen_le32(opcode);
+}
+
+static void asm_emit_coprocessor_opcode(uint32_t high_nibble, uint8_t cp_number, uint8_t cp_opcode, uint8_t cp_destination_register, uint8_t cp_n_operand_register, uint8_t cp_m_operand_register, uint8_t cp_opcode2, int inter_processor_transfer)
+{
+    uint32_t opcode = 0xe000000;
+    if (inter_processor_transfer)
+        opcode |= 1 << 4;
+    //assert(cp_opcode < 16);
+    opcode |= cp_opcode << 20;
+    //assert(cp_n_operand_register < 16);
+    opcode |= cp_n_operand_register << 16;
+    //assert(cp_destination_register < 16);
+    opcode |= cp_destination_register << 12;
+    //assert(cp_number < 16);
+    opcode |= cp_number << 8;
+    //assert(cp_information < 8);
+    opcode |= cp_opcode2 << 5;
+    //assert(cp_m_operand_register < 16);
+    opcode |= cp_m_operand_register;
+    asm_emit_unconditional_opcode((high_nibble << 28) | opcode);
 }
 
 static void asm_nullary_opcode(int token)
@@ -188,6 +212,7 @@ static void asm_unary_opcode(TCCState *s1, int token)
 
     switch (ARM_INSTRUCTION_GROUP(token)) {
     case TOK_ASM_swieq:
+    case TOK_ASM_svceq:
         if (op.type != OP_IM8)
             expect("immediate 8-bit unsigned integer");
         else {
@@ -309,6 +334,97 @@ static void asm_binary_opcode(TCCState *s1, int token)
     }
 }
 
+static void asm_coprocessor_opcode(TCCState *s1, int token) {
+    uint8_t coprocessor;
+    Operand opcode1;
+    Operand opcode2;
+    uint8_t registers[3];
+    unsigned int i;
+    uint8_t high_nibble;
+    uint8_t mrc = 0;
+
+    if (tok >= TOK_ASM_p0 && tok <= TOK_ASM_p15) {
+        coprocessor = tok - TOK_ASM_p0;
+        next();
+    } else {
+        expect("'p<number>'");
+        return;
+    }
+
+    if (tok == ',')
+        next();
+    else
+        expect("','");
+
+    parse_operand(s1, &opcode1);
+    if (opcode1.type != OP_IM8 || opcode1.e.v > 15) {
+        tcc_error("opcode1 of instruction '%s' must be an immediate value between 0 and 15", get_tok_str(token, NULL));
+        return;
+    }
+
+    for (i = 0; i < 3; ++i) {
+        if (tok == ',')
+            next();
+        else
+            expect("','");
+        if (i == 0 && token != TOK_ASM_cdp2 && (ARM_INSTRUCTION_GROUP(token) == TOK_ASM_mrceq || ARM_INSTRUCTION_GROUP(token) == TOK_ASM_mcreq)) {
+            if (tok >= TOK_ASM_r0 && tok <= TOK_ASM_r15) {
+                registers[i] = tok - TOK_ASM_r0;
+                next();
+            } else {
+                expect("'r<number>'");
+                return;
+            }
+        } else {
+            if (tok >= TOK_ASM_c0 && tok <= TOK_ASM_c15) {
+                registers[i] = tok - TOK_ASM_c0;
+                next();
+            } else {
+                expect("'c<number>'");
+                return;
+            }
+        }
+    }
+    if (tok == ',') {
+        next();
+        parse_operand(s1, &opcode2);
+    } else {
+        opcode2.type = OP_IM8;
+        opcode2.e.v = 0;
+    }
+    if (opcode2.type != OP_IM8 || opcode2.e.v > 15) {
+        tcc_error("opcode2 of instruction '%s' must be an immediate value between 0 and 15", get_tok_str(token, NULL));
+        return;
+    }
+
+    if (token == TOK_ASM_cdp2) {
+        high_nibble = 0xF;
+        asm_emit_coprocessor_opcode(high_nibble, coprocessor, opcode1.e.v, registers[0], registers[1], registers[2], opcode2.e.v, 0);
+        return;
+    } else
+        high_nibble = condition_code_of_token(token);
+
+    switch (ARM_INSTRUCTION_GROUP(token)) {
+    case TOK_ASM_cdpeq:
+        asm_emit_coprocessor_opcode(high_nibble, coprocessor, opcode1.e.v, registers[0], registers[1], registers[2], opcode2.e.v, 0);
+        break;
+    case TOK_ASM_mrceq:
+        // opcode1 encoding changes! highest and lowest bit gone.
+        mrc = 1;
+        /* fallthrough */
+    case TOK_ASM_mcreq:
+        // opcode1 encoding changes! highest and lowest bit gone.
+        if (opcode1.e.v > 7) {
+            tcc_error("opcode1 of instruction '%s' must be an immediate value between 0 and 7", get_tok_str(token, NULL));
+            return;
+        }
+        asm_emit_coprocessor_opcode(high_nibble, coprocessor, (opcode1.e.v << 1) | mrc, registers[0], registers[1], registers[2], opcode2.e.v, 1);
+        break;
+    default:
+        expect("known instruction");
+    }
+}
+
 /* data processing and single data transfer instructions only */
 #define ENCODE_RN(register_index) ((register_index) << 16)
 #define ENCODE_RD(register_index) ((register_index) << 12)
@@ -329,7 +445,7 @@ static void asm_binary_opcode(TCCState *s1, int token)
 static void asm_block_data_transfer_opcode(TCCState *s1, int token)
 {
     uint32_t opcode;
-    int op0_exclam;
+    int op0_exclam = 0;
     Operand ops[2];
     int nb_ops = 1;
     parse_operand(s1, &ops[0]);
@@ -388,30 +504,30 @@ static void asm_block_data_transfer_opcode(TCCState *s1, int token)
     case TOK_ASM_ldmibeq:
         switch (ARM_INSTRUCTION_GROUP(token)) {
         case TOK_ASM_stmdaeq: // post-decrement store
-            opcode = 0x82 << 20;
+            opcode = 0x80 << 20;
             break;
         case TOK_ASM_ldmdaeq: // post-decrement load
-            opcode = 0x83 << 20;
+            opcode = 0x81 << 20;
             break;
         case TOK_ASM_stmeq: // post-increment store
         case TOK_ASM_stmiaeq: // post-increment store
-            opcode = 0x8a << 20;
+            opcode = 0x88 << 20;
             break;
         case TOK_ASM_ldmeq: // post-increment load
         case TOK_ASM_ldmiaeq: // post-increment load
-            opcode = 0x8b << 20;
+            opcode = 0x89 << 20;
             break;
         case TOK_ASM_stmdbeq: // pre-decrement store
-            opcode = 0x92 << 20;
+            opcode = 0x90 << 20;
             break;
         case TOK_ASM_ldmdbeq: // pre-decrement load
-            opcode = 0x93 << 20;
+            opcode = 0x91 << 20;
             break;
         case TOK_ASM_stmibeq: // pre-increment store
-            opcode = 0x9a << 20;
+            opcode = 0x98 << 20;
             break;
         case TOK_ASM_ldmibeq: // pre-increment load
-            opcode = 0x9b << 20;
+            opcode = 0x99 << 20;
             break;
         default:
             tcc_error("internal error: This place should not be reached (fallback in asm_block_data_transfer_opcode)");
@@ -423,10 +539,11 @@ static void asm_block_data_transfer_opcode(TCCState *s1, int token)
             expect("exactly two operands");
         else if (ops[0].type != OP_REG32)
             expect("(first operand) register");
-        else if (!op0_exclam)
-            tcc_error("first operand of '%s' should have an exclamation mark", get_tok_str(token, NULL));
-        else
+        else {
+            if (op0_exclam)
+                opcode |= 1 << 21; // writeback
             asm_emit_opcode(token, opcode | ENCODE_RN(ops[0].reg) | ops[1].regset);
+        }
         break;
     default:
         expect("block data transfer instruction");
@@ -507,7 +624,7 @@ static void asm_data_processing_opcode(TCCState *s1, int token)
 {
     Operand ops[3];
     int nb_ops;
-    Operand shift = {};
+    Operand shift = {0};
     int nb_shift = 0;
     uint32_t operands = 0;
 
@@ -748,7 +865,8 @@ static void asm_shift_opcode(TCCState *s1, int token)
     case OP_IM8:
         operands |= ENCODE_IMMEDIATE_FLAG;
         operands |= ops[1].e.v;
-        break;
+        tcc_error("Using an immediate value as the source operand is not possible with '%s' instruction on ARM", get_tok_str(token, NULL));
+        return;
     }
 
     switch (ops[2].type) {
@@ -1148,6 +1266,390 @@ static void asm_single_data_transfer_opcode(TCCState *s1, int token)
     }
 }
 
+static void asm_emit_coprocessor_data_transfer(uint32_t high_nibble, uint8_t cp_number, uint8_t CRd, const Operand* Rn, const Operand* offset, int offset_minus, int preincrement, int writeback, int long_transfer, int load) {
+    uint32_t opcode = 0x0;
+    opcode |= 1 << 26; // Load/Store
+    opcode |= 1 << 27; // coprocessor
+
+    if (long_transfer)
+        opcode |= 1 << 22; // long transfer
+
+    if (load)
+        opcode |= 1 << 20; // L
+
+    opcode |= cp_number << 8;
+
+    opcode |= ENCODE_RD(CRd);
+
+    if (Rn->type != OP_REG32) {
+        expect("register");
+        return;
+    }
+    opcode |= ENCODE_RN(Rn->reg);
+    if (preincrement)
+        opcode |= 1 << 24; // add offset before transfer
+
+    if (writeback)
+        opcode |= 1 << 21; // write offset back into register
+
+    if (offset->type == OP_IM8 || offset->type == OP_IM8N || offset->type == OP_IM32) {
+        int v = offset->e.v;
+        if (offset_minus)
+            tcc_error("minus before '#' not supported for immediate values");
+        if (offset->type == OP_IM8N || v < 0)
+            v = -v;
+        else
+            opcode |= 1 << 23; // up
+        if (v & 3) {
+            tcc_error("immediate offset must be a multiple of 4");
+            return;
+        }
+        v >>= 2;
+        if (v > 255) {
+            tcc_error("immediate offset must be between -1020 and 1020");
+            return;
+        }
+        opcode |= v;
+    } else if (offset->type == OP_REG32) {
+        if (!offset_minus)
+            opcode |= 1 << 23; // up
+        opcode |= ENCODE_IMMEDIATE_FLAG; /* if set, it means it's NOT immediate */
+        opcode |= offset->reg;
+        tcc_error("Using register offset to register address is not possible here");
+        return;
+    } else
+        expect("immediate or register");
+
+    asm_emit_unconditional_opcode((high_nibble << 28) | opcode);
+}
+
+// Almost exactly the same as asm_single_data_transfer_opcode.
+// Difference: Offsets are smaller and multiples of 4; no shifts, no STREX, ENCODE_IMMEDIATE_FLAG is inverted again.
+static void asm_coprocessor_data_transfer_opcode(TCCState *s1, int token)
+{
+    Operand ops[3];
+    uint8_t coprocessor;
+    uint8_t coprocessor_destination_register;
+    int preincrement = 0;
+    int exclam = 0;
+    int closed_bracket = 0;
+    int op2_minus = 0;
+    int long_transfer = 0;
+    // Note: ldc p1, c0, [r4, #4]  ; simple offset: r0 = *(int*)(r4+4); r4 unchanged
+    // Note: ldc p2, c0, [r4, #4]! ; pre-indexed:   r0 = *(int*)(r4+4); r4 = r4+4
+    // Note: ldc p3, c0, [r4], #4  ; post-indexed:  r0 = *(int*)(r4+0); r4 = r4+4
+
+    if (tok >= TOK_ASM_p0 && tok <= TOK_ASM_p15) {
+        coprocessor = tok - TOK_ASM_p0;
+        next();
+    } else {
+        expect("'c<number>'");
+        return;
+    }
+
+    if (tok == ',')
+        next();
+    else
+        expect("','");
+
+    if (tok >= TOK_ASM_c0 && tok <= TOK_ASM_c15) {
+        coprocessor_destination_register = tok - TOK_ASM_c0;
+        next();
+    } else {
+        expect("'c<number>'");
+        return;
+    }
+
+    if (tok == ',')
+        next();
+    else
+        expect("','");
+
+    if (tok != '[')
+        expect("'['");
+    else
+        next(); // skip '['
+
+    parse_operand(s1, &ops[1]);
+    if (ops[1].type != OP_REG32) {
+        expect("(first source operand) register");
+        return;
+    }
+    if (tok == ']') {
+        next();
+        closed_bracket = 1;
+        // exclam = 1; // implicit in hardware; don't do it in software
+    }
+    if (tok == ',') {
+        next(); // skip ','
+        if (tok == '-') {
+            op2_minus = 1;
+            next();
+        }
+        parse_operand(s1, &ops[2]);
+        if (ops[2].type == OP_REG32) {
+            if (ops[2].reg == 15) {
+                tcc_error("Using 'pc' for register offset in '%s' is not implemented by ARM", get_tok_str(token, NULL));
+                return;
+            }
+        }
+    } else {
+        // end of input expression in brackets--assume 0 offset
+        ops[2].type = OP_IM8;
+        ops[2].e.v = 0;
+        preincrement = 1; // add offset before transfer
+    }
+    if (!closed_bracket) {
+        if (tok != ']')
+            expect("']'");
+        else
+            next(); // skip ']'
+        preincrement = 1; // add offset before transfer
+        if (tok == '!') {
+            exclam = 1;
+            next(); // skip '!'
+        }
+    }
+
+    // TODO: Support options.
+
+    if (token == TOK_ASM_ldc2 || token == TOK_ASM_stc2 || token == TOK_ASM_ldc2l || token == TOK_ASM_stc2l) {
+        switch (token) {
+        case TOK_ASM_ldc2l:
+            long_transfer = 1; // long transfer
+            /* fallthrough */
+        case TOK_ASM_ldc2:
+            asm_emit_coprocessor_data_transfer(0xF, coprocessor, coprocessor_destination_register, &ops[1], &ops[2], op2_minus, preincrement, exclam, long_transfer, 1);
+            break;
+        case TOK_ASM_stc2l:
+            long_transfer = 1; // long transfer
+            /* fallthrough */
+        case TOK_ASM_stc2:
+            asm_emit_coprocessor_data_transfer(0xF, coprocessor, coprocessor_destination_register, &ops[1], &ops[2], op2_minus, preincrement, exclam, long_transfer, 0);
+            break;
+        }
+    } else switch (ARM_INSTRUCTION_GROUP(token)) {
+    case TOK_ASM_stcleq:
+        long_transfer = 1;
+        /* fallthrough */
+    case TOK_ASM_stceq:
+        asm_emit_coprocessor_data_transfer(condition_code_of_token(token), coprocessor, coprocessor_destination_register, &ops[1], &ops[2], op2_minus, preincrement, exclam, long_transfer, 0);
+        break;
+    case TOK_ASM_ldcleq:
+        long_transfer = 1;
+        /* fallthrough */
+    case TOK_ASM_ldceq:
+        asm_emit_coprocessor_data_transfer(condition_code_of_token(token), coprocessor, coprocessor_destination_register, &ops[1], &ops[2], op2_minus, preincrement, exclam, long_transfer, 1);
+        break;
+    default:
+        expect("coprocessor data transfer instruction");
+    }
+}
+
+#if defined(TCC_ARM_VFP)
+#define CP_SINGLE_PRECISION_FLOAT 10
+#define CP_DOUBLE_PRECISION_FLOAT 11
+
+/* Read the VFP register referred to by T.
+   If OK, returns its number.
+   If not OK, returns -1. */
+static int asm_parse_vfp_regvar(int t, int double_precision)
+{
+    if (double_precision) {
+        if (t >= TOK_ASM_d0 && t <= TOK_ASM_d15)
+            return t - TOK_ASM_d0;
+    } else {
+        if (t >= TOK_ASM_s0 && t <= TOK_ASM_s31)
+            return t - TOK_ASM_s0;
+    }
+    return -1;
+}
+
+
+static void asm_floating_point_single_data_transfer_opcode(TCCState *s1, int token)
+{
+    Operand ops[3];
+    uint8_t coprocessor = 0;
+    uint8_t coprocessor_destination_register = 0;
+    int long_transfer = 0;
+    int reg;
+    // Note: vldr p1, c0, [r4, #4]  ; simple offset: r0 = *(int*)(r4+4); r4 unchanged
+    // Note: Not allowed: vldr p2, c0, [r4, #4]! ; pre-indexed:   r0 = *(int*)(r4+4); r4 = r4+4
+    // Note: Not allowed: vldr p3, c0, [r4], #4  ; post-indexed:  r0 = *(int*)(r4+0); r4 = r4+4
+
+    if ((reg = asm_parse_vfp_regvar(tok, 0)) != -1) {
+        coprocessor = CP_SINGLE_PRECISION_FLOAT;
+        coprocessor_destination_register = reg;
+        long_transfer = coprocessor_destination_register & 1;
+        coprocessor_destination_register >>= 1;
+        next();
+    } else if ((reg = asm_parse_vfp_regvar(tok, 1)) != -1) {
+        coprocessor = CP_DOUBLE_PRECISION_FLOAT;
+        coprocessor_destination_register = reg;
+        next();
+    } else {
+        expect("floating point register");
+        return;
+    }
+
+    if (tok == ',')
+        next();
+    else
+        expect("','");
+
+    if (tok != '[')
+        expect("'['");
+    else
+        next(); // skip '['
+
+    parse_operand(s1, &ops[1]);
+    if (ops[1].type != OP_REG32) {
+        expect("(first source operand) register");
+        return;
+    }
+    if (tok == ',') {
+        next(); // skip ','
+        parse_operand(s1, &ops[2]);
+        if (ops[2].type != OP_IM8 && ops[2].type != OP_IM8N) {
+            expect("immediate offset");
+            return;
+        }
+    } else {
+        // end of input expression in brackets--assume 0 offset
+        ops[2].type = OP_IM8;
+        ops[2].e.v = 0;
+    }
+    if (tok != ']')
+        expect("']'");
+    else
+        next(); // skip ']'
+
+    switch (ARM_INSTRUCTION_GROUP(token)) {
+    case TOK_ASM_vldreq:
+        asm_emit_coprocessor_data_transfer(condition_code_of_token(token), coprocessor, coprocessor_destination_register, &ops[1], &ops[2], 0, 1, 0, long_transfer, 1);
+        break;
+    case TOK_ASM_vstreq:
+        asm_emit_coprocessor_data_transfer(condition_code_of_token(token), coprocessor, coprocessor_destination_register, &ops[1], &ops[2], 0, 1, 0, long_transfer, 0);
+        break;
+    default:
+        expect("floating point data transfer instruction");
+    }
+}
+
+static void asm_floating_point_block_data_transfer_opcode(TCCState *s1, int token)
+{
+    uint8_t coprocessor = 0;
+    int first_regset_register;
+    int last_regset_register;
+    uint8_t regset_item_count;
+    uint8_t extra_register_bit = 0;
+    int op0_exclam = 0;
+    int load = 0;
+    int preincrement = 0;
+    Operand ops[1];
+    Operand offset;
+    switch (ARM_INSTRUCTION_GROUP(token)) {
+    case TOK_ASM_vpusheq:
+    case TOK_ASM_vpopeq:
+        ops[0].type = OP_REG32;
+        ops[0].reg = 13; // sp
+        op0_exclam = 1;
+        break;
+    default:
+        parse_operand(s1, &ops[0]);
+        if (tok == '!') {
+            op0_exclam = 1;
+            next(); // skip '!'
+        }
+        if (tok == ',')
+            next(); // skip comma
+        else {
+            expect("','");
+            return;
+        }
+    }
+
+    if (tok != '{') {
+        expect("'{'");
+        return;
+    }
+    next(); // skip '{'
+    first_regset_register = asm_parse_vfp_regvar(tok, 1);
+    if ((first_regset_register = asm_parse_vfp_regvar(tok, 1)) != -1) {
+        coprocessor = CP_DOUBLE_PRECISION_FLOAT;
+        next();
+    } else if ((first_regset_register = asm_parse_vfp_regvar(tok, 0)) != -1) {
+        coprocessor = CP_SINGLE_PRECISION_FLOAT;
+        next();
+    } else {
+        expect("floating-point register");
+        return;
+    }
+
+    if (tok == '-') {
+        next();
+        if ((last_regset_register = asm_parse_vfp_regvar(tok, coprocessor == CP_DOUBLE_PRECISION_FLOAT)) != -1)
+            next();
+        else {
+            expect("floating-point register");
+            return;
+        }
+    } else
+        last_regset_register = first_regset_register;
+
+    if (last_regset_register < first_regset_register) {
+        tcc_error("registers will be processed in ascending order by hardware--but are not specified in ascending order here");
+        return;
+    }
+    if (tok != '}') {
+        expect("'}'");
+        return;
+    }
+    next(); // skip '}'
+
+    // Note: 0 (one down) is not implemented by us regardless.
+    regset_item_count = last_regset_register - first_regset_register + 1;
+    if (coprocessor == CP_DOUBLE_PRECISION_FLOAT)
+        regset_item_count <<= 1;
+    else {
+        extra_register_bit = first_regset_register & 1;
+        first_regset_register >>= 1;
+    }
+    offset.type = OP_IM8;
+    offset.e.v = regset_item_count << 2;
+    switch (ARM_INSTRUCTION_GROUP(token)) {
+    case TOK_ASM_vstmeq: // post-increment store
+    case TOK_ASM_vstmiaeq: // post-increment store
+        break;
+    case TOK_ASM_vpopeq:
+    case TOK_ASM_vldmeq: // post-increment load
+    case TOK_ASM_vldmiaeq: // post-increment load
+        load = 1;
+        break;
+    case TOK_ASM_vldmdbeq: // pre-decrement load
+        load = 1;
+        /* fallthrough */
+    case TOK_ASM_vpusheq:
+    case TOK_ASM_vstmdbeq: // pre-decrement store
+        offset.type = OP_IM8N;
+        offset.e.v = -offset.e.v;
+        preincrement = 1;
+        break;
+    default:
+        expect("floating point block data transfer instruction");
+        return;
+    }
+    if (ops[0].type != OP_REG32)
+        expect("(first operand) register");
+    else if (ops[0].reg == 15)
+        tcc_error("'%s' does not support 'pc' as operand", get_tok_str(token, NULL));
+    else if (!op0_exclam && ARM_INSTRUCTION_GROUP(token) != TOK_ASM_vldmeq && ARM_INSTRUCTION_GROUP(token) != TOK_ASM_vldmiaeq && ARM_INSTRUCTION_GROUP(token) != TOK_ASM_vstmeq && ARM_INSTRUCTION_GROUP(token) != TOK_ASM_vstmiaeq)
+        tcc_error("first operand of '%s' should have an exclamation mark", get_tok_str(token, NULL));
+    else
+        asm_emit_coprocessor_data_transfer(condition_code_of_token(token), coprocessor, first_regset_register, &ops[0], &offset, 0, preincrement, op0_exclam, extra_register_bit, load);
+}
+#endif
+
 static void asm_misc_single_data_transfer_opcode(TCCState *s1, int token)
 {
     Operand ops[3];
@@ -1351,9 +1853,21 @@ ST_FUNC void asm_opcode(TCCState *s1, int token)
     }
     if (token == TOK_EOF)
         return;
-    if (token < TOK_ASM_nopeq) {
-        expect("instruction");
-        return;
+    if (token < TOK_ASM_nopeq) { // no condition code
+        switch (token) {
+        case TOK_ASM_cdp2:
+            asm_coprocessor_opcode(s1, token);
+            return;
+        case TOK_ASM_ldc2:
+        case TOK_ASM_ldc2l:
+        case TOK_ASM_stc2:
+        case TOK_ASM_stc2l:
+            asm_coprocessor_data_transfer_opcode(s1, token);
+            return;
+        default:
+            expect("instruction");
+            return;
+        }
     }
 
     switch (ARM_INSTRUCTION_GROUP(token)) {
@@ -1369,18 +1883,23 @@ ST_FUNC void asm_opcode(TCCState *s1, int token)
     case TOK_ASM_ldmdbeq:
     case TOK_ASM_stmibeq:
     case TOK_ASM_ldmibeq:
-        return asm_block_data_transfer_opcode(s1, token);
+        asm_block_data_transfer_opcode(s1, token);
+        return;
     case TOK_ASM_nopeq:
     case TOK_ASM_wfeeq:
     case TOK_ASM_wfieq:
-        return asm_nullary_opcode(token);
+        asm_nullary_opcode(token);
+        return;
     case TOK_ASM_swieq:
-        return asm_unary_opcode(s1, token);
+    case TOK_ASM_svceq:
+        asm_unary_opcode(s1, token);
+        return;
     case TOK_ASM_beq:
     case TOK_ASM_bleq:
     case TOK_ASM_bxeq:
     case TOK_ASM_blxeq:
-        return asm_branch_opcode(s1, token);
+        asm_branch_opcode(s1, token);
+        return;
     case TOK_ASM_clzeq:
     case TOK_ASM_sxtbeq:
     case TOK_ASM_sxtheq:
@@ -1388,7 +1907,8 @@ ST_FUNC void asm_opcode(TCCState *s1, int token)
     case TOK_ASM_uxtheq:
     case TOK_ASM_movteq:
     case TOK_ASM_movweq:
-        return asm_binary_opcode(s1, token);
+        asm_binary_opcode(s1, token);
+        return;
 
     case TOK_ASM_ldreq:
     case TOK_ASM_ldrbeq:
@@ -1398,13 +1918,15 @@ ST_FUNC void asm_opcode(TCCState *s1, int token)
     case TOK_ASM_ldrexbeq:
     case TOK_ASM_strexeq:
     case TOK_ASM_strexbeq:
-        return asm_single_data_transfer_opcode(s1, token);
+        asm_single_data_transfer_opcode(s1, token);
+        return;
 
     case TOK_ASM_ldrheq:
     case TOK_ASM_ldrsheq:
     case TOK_ASM_ldrsbeq:
     case TOK_ASM_strheq:
-       return asm_misc_single_data_transfer_opcode(s1, token);
+       asm_misc_single_data_transfer_opcode(s1, token);
+       return;
 
     case TOK_ASM_andeq:
     case TOK_ASM_eoreq:
@@ -1438,7 +1960,8 @@ ST_FUNC void asm_opcode(TCCState *s1, int token)
     case TOK_ASM_movseq:
     case TOK_ASM_bicseq:
     case TOK_ASM_mvnseq:
-        return asm_data_processing_opcode(s1, token);
+        asm_data_processing_opcode(s1, token);
+        return;
 
     case TOK_ASM_lsleq:
     case TOK_ASM_lslseq:
@@ -1450,13 +1973,15 @@ ST_FUNC void asm_opcode(TCCState *s1, int token)
     case TOK_ASM_rorseq:
     case TOK_ASM_rrxseq:
     case TOK_ASM_rrxeq:
-        return asm_shift_opcode(s1, token);
+        asm_shift_opcode(s1, token);
+        return;
 
     case TOK_ASM_muleq:
     case TOK_ASM_mulseq:
     case TOK_ASM_mlaeq:
     case TOK_ASM_mlaseq:
-        return asm_multiplication_opcode(s1, token);
+        asm_multiplication_opcode(s1, token);
+        return;
 
     case TOK_ASM_smulleq:
     case TOK_ASM_smullseq:
@@ -1466,7 +1991,40 @@ ST_FUNC void asm_opcode(TCCState *s1, int token)
     case TOK_ASM_smlalseq:
     case TOK_ASM_umlaleq:
     case TOK_ASM_umlalseq:
-        return asm_long_multiplication_opcode(s1, token);
+        asm_long_multiplication_opcode(s1, token);
+        return;
+
+    case TOK_ASM_cdpeq:
+    case TOK_ASM_mcreq:
+    case TOK_ASM_mrceq:
+        asm_coprocessor_opcode(s1, token);
+        return;
+
+    case TOK_ASM_ldceq:
+    case TOK_ASM_ldcleq:
+    case TOK_ASM_stceq:
+    case TOK_ASM_stcleq:
+        asm_coprocessor_data_transfer_opcode(s1, token);
+        return;
+
+#if defined(TCC_ARM_VFP)
+    case TOK_ASM_vldreq:
+    case TOK_ASM_vstreq:
+        asm_floating_point_single_data_transfer_opcode(s1, token);
+        return;
+
+    case TOK_ASM_vpusheq:
+    case TOK_ASM_vpopeq:
+    case TOK_ASM_vldmeq:
+    case TOK_ASM_vldmiaeq:
+    case TOK_ASM_vldmdbeq:
+    case TOK_ASM_vstmeq:
+    case TOK_ASM_vstmiaeq:
+    case TOK_ASM_vstmdbeq:
+        asm_floating_point_block_data_transfer_opcode(s1, token);
+        return;
+#endif
+
     default:
         expect("known instruction");
     }
