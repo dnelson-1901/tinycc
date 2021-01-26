@@ -120,6 +120,16 @@
  DEF_ASM(d14)
  DEF_ASM(d15)
 
+ /* VFP status registers */
+
+ DEF_ASM(fpsid)
+ DEF_ASM(fpscr)
+ DEF_ASM(fpexc)
+
+ /* VFP magical ARM register */
+
+ DEF_ASM(apsr_nzcv)
+
  /* data processing directives */
 
  DEF_ASM(asl)
@@ -152,6 +162,29 @@
   DEF(TOK_ASM_ ## x ## le, #x "le") \
   DEF(TOK_ASM_ ## x, #x) \
   DEF(TOK_ASM_ ## x ## rsvd, #x "rsvd")
+
+/* Note: condition code is 4 bits */
+#define DEF_ASM_CONDED_WITH_SUFFIX(x, y) \
+  DEF(TOK_ASM_ ## x ## eq ## _ ## y, #x "eq." #y) \
+  DEF(TOK_ASM_ ## x ## ne ## _ ## y, #x "ne." #y) \
+  DEF(TOK_ASM_ ## x ## cs ## _ ## y, #x "cs." #y) \
+  DEF(TOK_ASM_ ## x ## cc ## _ ## y, #x "cc." #y) \
+  DEF(TOK_ASM_ ## x ## mi ## _ ## y, #x "mi." #y) \
+  DEF(TOK_ASM_ ## x ## pl ## _ ## y, #x "pl." #y) \
+  DEF(TOK_ASM_ ## x ## vs ## _ ## y, #x "vs." #y) \
+  DEF(TOK_ASM_ ## x ## vc ## _ ## y, #x "vc." #y) \
+  DEF(TOK_ASM_ ## x ## hi ## _ ## y, #x "hi." #y) \
+  DEF(TOK_ASM_ ## x ## ls ## _ ## y, #x "ls." #y) \
+  DEF(TOK_ASM_ ## x ## ge ## _ ## y, #x "ge." #y) \
+  DEF(TOK_ASM_ ## x ## lt ## _ ## y, #x "lt." #y) \
+  DEF(TOK_ASM_ ## x ## gt ## _ ## y, #x "gt." #y) \
+  DEF(TOK_ASM_ ## x ## le ## _ ## y, #x "le." #y) \
+  DEF(TOK_ASM_ ## x ## _ ## y, #x "." #y) \
+  DEF(TOK_ASM_ ## x ## rsvd ## _ ## y, #x "rsvd." #y)
+
+#define DEF_ASM_CONDED_VFP_F32_F64(x) \
+  DEF_ASM_CONDED_WITH_SUFFIX(x, f32) \
+  DEF_ASM_CONDED_WITH_SUFFIX(x, f64)
 
 /* Note: add new tokens after nop (MUST always use DEF_ASM_CONDED) */
 
@@ -286,6 +319,22 @@
  DEF_ASM_CONDED(vldr)
  DEF_ASM_CONDED(vstr)
 
+ DEF_ASM_CONDED_VFP_F32_F64(vmla)
+ DEF_ASM_CONDED_VFP_F32_F64(vmls)
+ DEF_ASM_CONDED_VFP_F32_F64(vnmls)
+ DEF_ASM_CONDED_VFP_F32_F64(vnmla)
+ DEF_ASM_CONDED_VFP_F32_F64(vmul)
+ DEF_ASM_CONDED_VFP_F32_F64(vnmul)
+ DEF_ASM_CONDED_VFP_F32_F64(vadd)
+ DEF_ASM_CONDED_VFP_F32_F64(vsub)
+ DEF_ASM_CONDED_VFP_F32_F64(vdiv)
+ DEF_ASM_CONDED_VFP_F32_F64(vneg)
+ DEF_ASM_CONDED_VFP_F32_F64(vabs)
+ DEF_ASM_CONDED_VFP_F32_F64(vsqrt)
+ DEF_ASM_CONDED_VFP_F32_F64(vcmp)
+ DEF_ASM_CONDED_VFP_F32_F64(vcmpe)
+ DEF_ASM_CONDED_VFP_F32_F64(vmov)
+
  DEF_ASM_CONDED(vpush)
  DEF_ASM_CONDED(vpop)
  DEF_ASM_CONDED(vldm)
@@ -294,3 +343,5 @@
  DEF_ASM_CONDED(vstm)
  DEF_ASM_CONDED(vstmia)
  DEF_ASM_CONDED(vstmdb)
+ DEF_ASM_CONDED(vmsr)
+ DEF_ASM_CONDED(vmrs)
