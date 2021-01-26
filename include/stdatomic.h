@@ -66,14 +66,14 @@ typedef struct {
 #define ATOMIC_FLAG_INIT { 0 }
 
 #define atomic_flag_test_and_set(object) \
-    __c11_atomic_exchange(&(object)->value, 1, __ATOMIC_SEQ_CST)
+    __atomic_exchange(&(object)->value, 1, __ATOMIC_SEQ_CST)
 #define atomic_flag_test_and_set_explicit(object, order) \
-    __c11_atomic_exchange(&(object)->value, 1, order)
+    __atomic_exchange(&(object)->value, 1, order)
 
 #define atomic_flag_clear(object) \
-    __c11_atomic_store(&(object)->value, 0, __ATOMIC_SEQ_CST)
+    __atomic_store(&(object)->value, 0, __ATOMIC_SEQ_CST)
 #define atomic_flag_clear_explicit(object, order) \
-    __c11_atomic_store(&(object)->value, 0, order)
+    __atomic_store(&(object)->value, 0, order)
 
 /* Generic routines */
 #define atomic_store(object, desired) \
