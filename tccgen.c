@@ -120,7 +120,7 @@ short nb_temp_local_vars;
 
 static struct scope {
     struct scope *prev;
-    struct { int loc, num; } vla;
+    struct { int loc, locorig, num; } vla;
     struct { Sym *s; int n; } cl;
     int *bsym, *csym;
     Sym *lstk, *llstk;
@@ -208,7 +208,6 @@ static struct debug_info {
 
 static struct {
     unsigned long offset;
-    unsigned long last_offset;
     unsigned long last_file_name;
     unsigned long last_func_name;
     int ind;
@@ -822,6 +821,7 @@ static void tcc_tcov_block_begin(void)
 {
     SValue sv;
     void *ptr;
+    unsigned long last_offset = tcov_data.offset;
 
     tcc_tcov_block_end (0);
     if (tcc_state->test_coverage == 0 || nocode_wanted)
@@ -837,11 +837,17 @@ static void tcc_tcov_block_begin(void)
 	    section_ptr_add(tcov_section, 1);
 	if (tcov_data.last_file_name)
 	    section_ptr_add(tcov_section, 1);
-	getcwd (wd, sizeof(wd));
-	tcov_data.last_file_name = tcov_section->data_offset + strlen(wd) + 1;
 	tcov_data.last_func_name = 0;
 	cstr_new (&cstr);
-	cstr_printf (&cstr, "%s/%s", wd, file->true_filename);
+	if (file->true_filename[0] == '/') {
+	    tcov_data.last_file_name = tcov_section->data_offset;
+	    cstr_printf (&cstr, "%s", file->true_filename);
+	}
+	else {
+	    getcwd (wd, sizeof(wd));
+	    tcov_data.last_file_name = tcov_section->data_offset + strlen(wd) + 1;
+	    cstr_printf (&cstr, "%s/%s", wd, file->true_filename);
+	}
 	ptr = section_ptr_add(tcov_section, cstr.size + 1);
 	strncpy((char *)ptr, cstr.data, cstr.size);
 #ifdef _WIN32
@@ -865,7 +871,7 @@ static void tcc_tcov_block_begin(void)
 	write64le (ptr, file->line_num);
     }
     if (ind == tcov_data.ind && tcov_data.line == file->line_num)
-        tcov_data.offset = tcov_data.last_offset;
+        tcov_data.offset = last_offset;
     else {
         Sym label = {0};
         label.type.t = VT_LLONG | VT_STATIC;
@@ -903,7 +909,6 @@ static void tcc_tcov_block_end(int line)
 	unsigned long long nline = line ? line : file->line_num;
 
 	write64le (ptr, (read64le (ptr) & 0xfffffffffull) | (nline << 36));
-	tcov_data.last_offset = tcov_data.offset;
 	tcov_data.offset = 0;
     }
 }
@@ -5727,20 +5732,24 @@ static void parse_builtin_params(int nc, const char *args)
         nocode_wanted--;
 }
 
-static void parse_memory_model(int mtok)
+static inline int is_memory_model(const SValue *sv)
 {
-    next();
-
-    switch (mtok) {
-    case TOK___ATOMIC_RELAXED: vpushs(0); break;
-    case TOK___ATOMIC_CONSUME: vpushs(1); break;
-    case TOK___ATOMIC_ACQUIRE: vpushs(2); break;
-    case TOK___ATOMIC_RELEASE: vpushs(3); break;
-    case TOK___ATOMIC_ACQ_REL: vpushs(4); break;
-    case TOK___ATOMIC_SEQ_CST: vpushs(5); break;
-    }
-
-    vtop->type.t |= (VT_UNSIGNED | VT_MEMMODEL);
+    /*
+     * FIXME
+     * The memory models should better be backed by an enumeration.
+     *
+     *    const int t = sv->type.t;
+     *
+     *    if (!IS_ENUM_VAL(t))
+     *        return 0;
+     *
+     *    if (!(t & VT_STATIC))
+     *        return 0;
+     *
+     * Ideally we should check whether the model matches 1:1.
+     * If it is possible, we should check by the name of the value.
+     */
+    return (((sv->type.t & VT_BTYPE) == VT_INT) && (sv->c.i < 6));
 }
 
 static void parse_atomic(int atok)
@@ -5762,17 +5771,17 @@ static void parse_atomic(int atok)
          * v -- value
          * m -- memory model
          */
-        {TOK___atomic_init, "-a"},
-        {TOK___atomic_store, "-avm"},
-        {TOK___atomic_load, "am"},
-        {TOK___atomic_exchange, "avm"},
-        {TOK___atomic_compare_exchange_strong, "apvmm"},
-        {TOK___atomic_compare_exchange_weak, "apvmm"},
-        {TOK___atomic_fetch_add, "avm"},
-        {TOK___atomic_fetch_sub, "avm"},
-        {TOK___atomic_fetch_or, "avm"},
-        {TOK___atomic_fetch_xor, "avm"},
-        {TOK___atomic_fetch_and, "avm"},
+        {TOK___c11_atomic_init, "-av"},
+        {TOK___c11_atomic_store, "-avm"},
+        {TOK___c11_atomic_load, "am"},
+        {TOK___c11_atomic_exchange, "avm"},
+        {TOK___c11_atomic_compare_exchange_strong, "apvmm"},
+        {TOK___c11_atomic_compare_exchange_weak, "apvmm"},
+        {TOK___c11_atomic_fetch_add, "avm"},
+        {TOK___c11_atomic_fetch_sub, "avm"},
+        {TOK___c11_atomic_fetch_or, "avm"},
+        {TOK___c11_atomic_fetch_xor, "avm"},
+        {TOK___c11_atomic_fetch_and, "avm"},
     };
 
     next();
@@ -5837,8 +5846,8 @@ static void parse_atomic(int atok)
             break;
 
         case 'm':
-            if ((vtop->type.t & VT_MEMMODEL) != VT_MEMMODEL)
-                expect_arg("memory model constant", arg);
+            if (!is_memory_model(vtop))
+                expect_arg("memory model", arg);
             vtop->type.t &= ~VT_MEMMODEL;
             break;
 
@@ -6234,28 +6243,18 @@ ST_FUNC void unary(void)
     }
 #endif
 
-    /* memory models */
-    case TOK___ATOMIC_RELAXED:
-    case TOK___ATOMIC_CONSUME:
-    case TOK___ATOMIC_ACQUIRE:
-    case TOK___ATOMIC_RELEASE:
-    case TOK___ATOMIC_ACQ_REL:
-    case TOK___ATOMIC_SEQ_CST:
-        parse_memory_model(tok);
-        break;
-
     /* atomic operations */
-    case TOK___atomic_init:
-    case TOK___atomic_store:
-    case TOK___atomic_load:
-    case TOK___atomic_exchange:
-    case TOK___atomic_compare_exchange_strong:
-    case TOK___atomic_compare_exchange_weak:
-    case TOK___atomic_fetch_add:
-    case TOK___atomic_fetch_sub:
-    case TOK___atomic_fetch_or:
-    case TOK___atomic_fetch_xor:
-    case TOK___atomic_fetch_and:
+    case TOK___c11_atomic_init:
+    case TOK___c11_atomic_store:
+    case TOK___c11_atomic_load:
+    case TOK___c11_atomic_exchange:
+    case TOK___c11_atomic_compare_exchange_strong:
+    case TOK___c11_atomic_compare_exchange_weak:
+    case TOK___c11_atomic_fetch_add:
+    case TOK___c11_atomic_fetch_sub:
+    case TOK___c11_atomic_fetch_or:
+    case TOK___c11_atomic_fetch_xor:
+    case TOK___c11_atomic_fetch_and:
         parse_atomic(tok);
         break;
 
@@ -7269,8 +7268,12 @@ static void vla_restore(int loc)
 
 static void vla_leave(struct scope *o)
 {
-    if (o->vla.num < cur_scope->vla.num)
-        vla_restore(o->vla.loc);
+    struct scope *c = cur_scope, *v = NULL;
+    for (; c != o && c; c = c->prev)
+      if (c->vla.num)
+        v = c;
+    if (v)
+      vla_restore(v->vla.locorig);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -7282,6 +7285,7 @@ void new_scope(struct scope *o)
     *o = *cur_scope;
     o->prev = cur_scope;
     cur_scope = o;
+    cur_scope->vla.num = 0;
 
     /* record local declaration stack position */
     o->lstk = local_stack;
@@ -7582,6 +7586,7 @@ again:
                 || (cur_switch->sv.type.t & VT_UNSIGNED && (uint64_t)cr->v2 < (uint64_t)cr->v1))
                 tcc_warning("empty case range");
         }
+        tcov_data.ind = 0;
         cr->sym = gind();
         dynarray_add(&cur_switch->p, &cur_switch->n, cr);
         skip(':');
@@ -7593,13 +7598,15 @@ again:
             expect("switch");
         if (cur_switch->def_sym)
             tcc_error("too many 'default'");
+        tcov_data.ind = 0;
         cur_switch->def_sym = gind();
         skip(':');
         is_expr = 0;
         goto block_after_label;
 
     } else if (t == TOK_GOTO) {
-        vla_restore(root_scope->vla.loc);
+        if (cur_scope->vla.num)
+          vla_restore(cur_scope->vla.locorig);
         if (tok == '*' && gnu_ext) {
             /* computed goto */
             next();
@@ -8565,11 +8572,14 @@ static void decl_initializer_alloc(CType *type, AttributeDef *ad, int r,
         if (NODATA_WANTED)
             goto no_alloc;
 
-        /* save current stack pointer */
-        if (root_scope->vla.loc == 0) {
-            struct scope *v = cur_scope;
-            gen_vla_sp_save(loc -= PTR_SIZE);
-            do v->vla.loc = loc; while ((v = v->prev));
+        /* save before-VLA stack pointer if needed */
+        if (cur_scope->vla.num == 0) {
+            if (cur_scope->prev && cur_scope->prev->vla.num) {
+                cur_scope->vla.locorig = cur_scope->prev->vla.loc;
+            } else {
+                gen_vla_sp_save(loc -= PTR_SIZE);
+                cur_scope->vla.locorig = loc;
+            }
         }
 
         vla_runtime_type_size(type, &a);
