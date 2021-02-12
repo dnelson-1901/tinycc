@@ -19,6 +19,6 @@
 
 int main(void)
 {
-  printf ("h_b_b=%d h_k_b=%d h_u_b=%d\n", 
+  printf ("h_h_b=%d h_k_b=%d h_u_b=%d\n",
     HAS_HAS_BUILTIN, HAS_KNOWN_BUILTIN, HAS_UNKNOWN_BUILTIN);
 }
