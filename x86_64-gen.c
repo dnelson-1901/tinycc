@@ -112,7 +112,7 @@ enum {
 #include "tcc.h"
 #include <assert.h>
 
-ST_DATA const char *target_machine_defs =
+ST_DATA const char * const target_machine_defs =
     "__x86_64__\0"
     "__amd64__\0"
     ;
@@ -575,7 +575,9 @@ void store(int r, SValue *v)
 
 #ifndef TCC_TARGET_PE
     /* we need to access the variable via got */
-    if (fr == VT_CONST && (v->r & VT_SYM)) {
+    if (fr == VT_CONST
+        && (v->r & VT_SYM)
+        && !(v->sym->type.t & VT_STATIC)) {
         /* mov xx(%rip), %r11 */
         o(0x1d8b4c);
         gen_gotpcrel(TREG_R11, v->sym, v->c.i);
@@ -735,7 +737,7 @@ static int arg_prepare_reg(int idx) {
       /* idx=0: r10, idx=1: r11 */
       return idx + 10;
   else
-      return arg_regs[idx];
+      return idx >= 0 && idx < REGN ? arg_regs[idx] : 0;
 }
 
 /* Generate function call. The function address is pushed first, then
@@ -1221,7 +1223,7 @@ static int arg_prepare_reg(int idx) {
       /* idx=2: r10, idx=3: r11 */
       return idx + 8;
   else
-      return arg_regs[idx];
+      return idx >= 0 && idx < REGN ? arg_regs[idx] : 0;
 }
 
 /* Generate function call. The function address is pushed first, then

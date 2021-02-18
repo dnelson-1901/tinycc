@@ -259,7 +259,7 @@ static void * add_lc(struct macho *mo, uint32_t cmd, uint32_t cmdsize)
     return lc;
 }
 
-static struct segment_command_64 * add_segment(struct macho *mo, char *name)
+static struct segment_command_64 * add_segment(struct macho *mo, const char *name)
 {
     struct segment_command_64 *sc = add_lc(mo, LC_SEGMENT_64, sizeof(*sc));
     strncpy(sc->segname, name, 16);
@@ -272,7 +272,7 @@ static struct segment_command_64 * get_segment(struct macho *mo, int i)
     return (struct segment_command_64 *) (mo->lc[mo->seg2lc[i]]);
 }
 
-static int add_section(struct macho *mo, struct segment_command_64 **_seg, char *name)
+static int add_section(struct macho *mo, struct segment_command_64 **_seg, const char *name)
 {
     struct segment_command_64 *seg = *_seg;
     int ret = seg->nsects;
@@ -525,10 +525,10 @@ static void create_symtab(TCCState *s1, struct macho *mo)
     }
 }
 
-struct {
+const struct {
     int seg;
     uint32_t flags;
-    char *name;
+    const char *name;
 } skinfo[sk_last] = {
     /*[sk_unknown] =*/  { 0 },
     /*[sk_discard] =*/  { 0 },
@@ -809,22 +809,14 @@ ST_FUNC int macho_output_file(TCCState *s1, const char *filename)
     check_relocs(s1, &mo);
     ret = check_symbols(s1, &mo);
     if (!ret) {
-        int i;
-        Section *s;
         collect_sections(s1, &mo);
         relocate_syms(s1, s1->symtab, 0);
         mo.ep->entryoff = get_sym_addr(s1, "main", 1, 1)
                             - get_segment(&mo, 1)->vmaddr;
         if (s1->nb_errors)
           goto do_ret;
-
-        for(i = 1; i < s1->nb_sections; i++) {
-            s = s1->sections[i];
-            if (s->reloc)
-              relocate_section(s1, s);
-        }
+        relocate_sections(s1);
         convert_symbols(s1, &mo);
-
         macho_write(s1, &mo, fp);
     }
 

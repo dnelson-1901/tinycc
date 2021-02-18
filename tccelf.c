@@ -58,8 +58,12 @@ ST_FUNC void tccelf_new(TCCState *s)
     /* create standard sections */
     text_section = new_section(s, ".text", SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR);
     data_section = new_section(s, ".data", SHT_PROGBITS, SHF_ALLOC | SHF_WRITE);
+#ifdef TCC_TARGET_PE
+    rodata_section = new_section(s, ".rdata", SHT_PROGBITS, SHF_ALLOC);
+#else
     /* create ro data section (make ro after relocation done with GNU_RELRO) */
-    data_ro_section = new_section(s, ".data.ro", SHT_PROGBITS, SHF_ALLOC | SHF_WRITE);
+    rodata_section = new_section(s, ".data.ro", SHT_PROGBITS, SHF_ALLOC | SHF_WRITE);
+#endif
     bss_section = new_section(s, ".bss", SHT_NOBITS, SHF_ALLOC | SHF_WRITE);
     common_section = new_section(s, ".common", SHT_NOBITS, SHF_PRIVATE);
     common_section->sh_num = SHN_COMMON;
@@ -206,7 +210,7 @@ ST_FUNC void tccelf_end_file(TCCState *s1)
     tcc_free(tr);
 
     /* record text/data/bss output for -bench info */
-    for (i = 0; i < 3; ++i) {
+    for (i = 0; i < 4; ++i) {
         s = s1->sections[i + 1];
         s1->total_output[i] += s->data_offset - s->sh_offset;
     }
@@ -737,25 +741,18 @@ ST_FUNC void put_elf_reloca(Section *symtab, Section *s, unsigned long offset,
     char buf[256];
     Section *sr;
     ElfW_Rel *rel;
-    int jmp_slot = type == R_JMP_SLOT;
 
-    sr = jmp_slot ? s->relocplt : s->reloc;
+    sr = s->reloc;
     if (!sr) {
         /* if no relocation section, create it */
-        if (jmp_slot)
-            snprintf(buf, sizeof(buf), RELPLT_SECTION_FMT);
-	else
-            snprintf(buf, sizeof(buf), REL_SECTION_FMT, s->name);
+        snprintf(buf, sizeof(buf), REL_SECTION_FMT, s->name);
         /* if the symtab is allocated, then we consider the relocation
            are also */
         sr = new_section(s->s1, buf, SHT_RELX, symtab->sh_flags);
         sr->sh_entsize = sizeof(ElfW_Rel);
         sr->link = symtab;
         sr->sh_info = s->sh_num;
-	if (jmp_slot)
-            s->relocplt = sr;
-	else
-            s->reloc = sr;
+        s->reloc = sr;
     }
     rel = section_ptr_add(sr, sizeof(ElfW_Rel));
     rel->r_offset = offset;
@@ -957,9 +954,8 @@ ST_FUNC void relocate_syms(TCCState *s1, Section *symtab, int do_resolve)
 
 /* relocate a given section (CPU dependent) by applying the relocations
    in the associated relocation section */
-ST_FUNC void relocate_section(TCCState *s1, Section *s)
+static void relocate_section(TCCState *s1, Section *s, Section *sr)
 {
-    Section *sr = s->reloc;
     ElfW_Rel *rel;
     ElfW(Sym) *sym;
     int type, sym_index;
@@ -967,7 +963,6 @@ ST_FUNC void relocate_section(TCCState *s1, Section *s)
     addr_t tgt, addr;
 
     qrel = (ElfW_Rel *)sr->data;
-
     for_each_elem(sr, 0, rel, ElfW_Rel) {
         ptr = s->data + rel->r_offset;
         sym_index = ELFW(R_SYM)(rel->r_info);
@@ -980,6 +975,7 @@ ST_FUNC void relocate_section(TCCState *s1, Section *s)
         addr = s->sh_addr + rel->r_offset;
         relocate(s1, rel, type, ptr, addr, tgt);
     }
+#ifndef ELF_OBJ_ONLY
     /* if the relocation is allocated, we change its symbol table */
     if (sr->sh_flags & SHF_ALLOC) {
         sr->link = s1->dynsym;
@@ -991,20 +987,37 @@ ST_FUNC void relocate_section(TCCState *s1, Section *s)
             sr->data_offset = sr->sh_size = r;
         }
     }
+#endif
+}
+
+/* relocate all sections */
+ST_FUNC void relocate_sections(TCCState *s1)
+{
+    int i;
+    Section *s, *sr;
+
+    for (i = 1; i < s1->nb_sections; ++i) {
+        sr = s1->sections[i];
+        if (sr->sh_type != SHT_RELX)
+            continue;
+        s = s1->sections[sr->sh_info];
+        if (s != s1->got
+            || s1->static_link
+            || s1->output_type == TCC_OUTPUT_MEMORY) {
+            relocate_section(s1, s, sr);
+        }
+#ifndef ELF_OBJ_ONLY
+        if (sr->sh_flags & SHF_ALLOC) {
+            ElfW_Rel *rel;
+            /* relocate relocation table in 'sr' */
+            for_each_elem(sr, 0, rel, ElfW_Rel)
+                rel->r_offset += s->sh_addr;
+        }
+#endif
+    }
 }
 
 #ifndef ELF_OBJ_ONLY
-/* relocate relocation table in 'sr' */
-static void relocate_rel(TCCState *s1, Section *sr)
-{
-    Section *s;
-    ElfW_Rel *rel;
-
-    s = s1->sections[sr->sh_info];
-    for_each_elem(sr, 0, rel, ElfW_Rel)
-        rel->r_offset += s->sh_addr;
-}
-
 /* count the number of dynamic relocations so that we can reserve
    their space */
 static int prepare_dynamic_rel(TCCState *s1, Section *sr)
@@ -1099,6 +1112,7 @@ static struct sym_attr * put_got_entry(TCCState *s1, int dyn_reloc_type,
     unsigned got_offset;
     char plt_name[100];
     int len;
+    Section *s_rel;
 
     need_plt_entry = (dyn_reloc_type == R_JMP_SLOT);
     attr = get_sym_attr(s1, sym_index, 1);
@@ -1108,6 +1122,15 @@ static struct sym_attr * put_got_entry(TCCState *s1, int dyn_reloc_type,
        entry (PLTGOT).  */
     if (need_plt_entry ? attr->plt_offset : attr->got_offset)
         return attr;
+
+    s_rel = s1->got;
+    if (need_plt_entry) {
+        if (!s1->plt) {
+            s1->plt = new_section(s1, ".plt", SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR);
+            s1->plt->sh_entsize = 4;
+        }
+        s_rel = s1->plt;
+    }
 
     /* create the GOT entry */
     got_offset = s1->got->data_offset;
@@ -1123,6 +1146,7 @@ static struct sym_attr * put_got_entry(TCCState *s1, int dyn_reloc_type,
 
     sym = &((ElfW(Sym) *) symtab_section->data)[sym_index];
     name = (char *) symtab_section->link->data + sym->st_name;
+    //printf("sym %d %s\n", need_plt_entry, name);
 
     if (s1->dynsym) {
 	if (ELFW(ST_BIND)(sym->st_info) == STB_LOCAL) {
@@ -1147,7 +1171,7 @@ static struct sym_attr * put_got_entry(TCCState *s1, int dyn_reloc_type,
                 attr->dyn_index = set_elf_sym(s1->dynsym, sym->st_value,
                                               sym->st_size, sym->st_info, 0,
                                               sym->st_shndx, name);
-	    put_elf_reloc(s1->dynsym, s1->got, got_offset, dyn_reloc_type,
+	    put_elf_reloc(s1->dynsym, s_rel, got_offset, dyn_reloc_type,
 			  attr->dyn_index);
 	}
     } else {
@@ -1156,12 +1180,6 @@ static struct sym_attr * put_got_entry(TCCState *s1, int dyn_reloc_type,
     }
 
     if (need_plt_entry) {
-        if (!s1->plt) {
-    	    s1->plt = new_section(s1, ".plt", SHT_PROGBITS,
-    			          SHF_ALLOC | SHF_EXECINSTR);
-    	    s1->plt->sh_entsize = 4;
-        }
-
         attr->plt_offset = create_plt_entry(s1, got_offset, attr);
 
         /* create a symbol 'sym@plt' for the PLT jump vector */
@@ -1172,7 +1190,6 @@ static struct sym_attr * put_got_entry(TCCState *s1, int dyn_reloc_type,
         strcpy(plt_name + len, "@plt");
         attr->plt_sym = put_elf_sym(s1->symtab, attr->plt_offset, sym->st_size,
             ELFW(ST_INFO)(STB_GLOBAL, STT_FUNC), 0, s1->plt->sh_num, plt_name);
-
     } else {
         attr->got_offset = got_offset;
     }
@@ -1181,14 +1198,18 @@ static struct sym_attr * put_got_entry(TCCState *s1, int dyn_reloc_type,
 }
 
 /* build GOT and PLT entries */
-static void build_got_entries_pass(TCCState *s1, int pass)
+/* Two passes because R_JMP_SLOT should become first. Some targets
+   (arm, arm64) do not allow mixing R_JMP_SLOT and R_GLOB_DAT. */
+ST_FUNC void build_got_entries(TCCState *s1)
 {
     Section *s;
     ElfW_Rel *rel;
     ElfW(Sym) *sym;
     int i, type, gotplt_entry, reloc_type, sym_index;
     struct sym_attr *attr;
+    int pass = 0;
 
+redo:
     for(i = 1; i < s1->nb_sections; i++) {
         s = s1->sections[i];
         if (s->sh_type != SHT_RELX)
@@ -1238,11 +1259,16 @@ static void build_got_entries_pass(TCCState *s1, int pass)
 				    && ELFW(ST_TYPE)(sym->st_info) == STT_FUNC)))
 			    goto jmp_slot;
 		    }
-                } else if (!(sym->st_shndx == SHN_ABS
+                } else if (sym->st_shndx == SHN_ABS) {
+                    if (sym->st_value == 0) /* from tcc_add_btstub() */
+                        continue;
 #ifndef TCC_TARGET_ARM
-			&& PTR_SIZE == 8
+                    if (PTR_SIZE != 8)
+                        continue;
 #endif
-			))
+                    /* from tcc_add_symbol(): on 64 bit platforms these
+                       need to go through .got */
+                } else
                     continue;
             }
 
@@ -1252,7 +1278,7 @@ static void build_got_entries_pass(TCCState *s1, int pass)
                 (ELFW(ST_VISIBILITY)(sym->st_other) != STV_DEFAULT ||
 		 ELFW(ST_BIND)(sym->st_info) == STB_LOCAL ||
 		 s1->output_type == TCC_OUTPUT_EXE)) {
-		if (pass == 0)
+		if (pass != 0)
 		    continue;
                 rel->r_info = ELFW(R_INFO)(sym_index, R_X86_64_PC32);
                 continue;
@@ -1261,16 +1287,17 @@ static void build_got_entries_pass(TCCState *s1, int pass)
             reloc_type = code_reloc(type);
             if (reloc_type == -1)
                 tcc_error ("Unknown relocation type: %d", type);
-            else if (reloc_type != 0) {
-            jmp_slot:
+
+            if (reloc_type != 0) {
+        jmp_slot:
+	        if (pass != 0)
+                    continue;
                 reloc_type = R_JMP_SLOT;
-            } else
+            } else {
+	        if (pass != 1)
+                    continue;
                 reloc_type = R_GLOB_DAT;
-
-
-	    if ((pass == 0 && reloc_type == R_GLOB_DAT) ||
-		(pass == 1 && reloc_type == R_JMP_SLOT))
-		continue;
+            }
 
             if (!s1->got)
                 build_got(s1);
@@ -1284,22 +1311,19 @@ static void build_got_entries_pass(TCCState *s1, int pass)
                 rel->r_info = ELFW(R_INFO)(attr->plt_sym, type);
         }
     }
-}
+    if (++pass < 2)
+        goto redo;
 
-ST_FUNC void build_got_entries(TCCState *s1)
-{
-    int i;
+    /* .rel.plt refers to .got actually */
+    if (s1->plt && s1->plt->reloc)
+        s1->plt->reloc->sh_info = s1->got->sh_num;
 
-    /* Two passes because R_JMP_SLOT should become first.
-       Some targets (arm, arm64) do not allow mixing R_JMP_SLOT and R_GLOB_DAT. */
-    for (i = 0; i < 2; i++)
-	build_got_entries_pass(s1, i);
 }
 #endif
 
 ST_FUNC int set_global_sym(TCCState *s1, const char *name, Section *sec, addr_t offs)
 {
-    int shn = sec ? sec->sh_num : offs ? SHN_ABS : SHN_UNDEF;
+    int shn = sec ? sec->sh_num : offs || !name ? SHN_ABS : SHN_UNDEF;
     if (sec && offs == -1)
         offs = sec->data_offset;
     return set_elf_sym(symtab_section, offs, 0,
@@ -1311,7 +1335,7 @@ static void add_init_array_defines(TCCState *s1, const char *section_name)
     Section *s;
     addr_t end_offset;
     char buf[1024];
-    s = find_section(s1, section_name);
+    s = find_section_create(s1, section_name, 0);
     if (!s) {
         end_offset = 0;
         s = data_section;
@@ -1392,12 +1416,8 @@ ST_FUNC void tcc_add_btstub(TCCState *s1)
     put_ptr(s1, stab_section, -1);
     put_ptr(s1, stab_section->link, 0);
     section_ptr_add(s, 3 * PTR_SIZE);
-    /* prog_base */
-#ifndef TCC_TARGET_MACHO
-    /* XXX this relocation is wrong, it uses sym-index 0 (local,undef) */
-    put_elf_reloc(s1->symtab, s, s->data_offset, R_DATA_PTR, 0);
-#endif
-    section_ptr_add(s, PTR_SIZE);
+    /* prog_base : local nameless symbol with offset 0 at SHN_ABS */
+    put_ptr(s1, NULL, 0);
     n = 2 * PTR_SIZE;
 #ifdef CONFIG_TCC_BCHECK
     if (s1->do_bounds_check) {
@@ -1406,10 +1426,10 @@ ST_FUNC void tcc_add_btstub(TCCState *s1)
     }
 #endif
     section_ptr_add(s, n);
-
     cstr_new(&cstr);
     cstr_printf(&cstr,
-        " extern void __bt_init(),*__rt_info[],__bt_init_dll();"
+        "extern void __bt_init(),__bt_init_dll();"
+        "static void *__rt_info[];"
         "__attribute__((constructor)) static void __bt_init_rt(){");
 #ifdef TCC_TARGET_PE
     if (s1->output_type == TCC_OUTPUT_DLL)
@@ -1511,8 +1531,9 @@ ST_FUNC void tcc_add_runtime(TCCState *s1)
                 tcc_add_btstub(s1);
         }
 #endif
-        if (strlen(TCC_LIBTCC1) > 0)
+        if (TCC_LIBTCC1[0])
             tcc_add_support(s1, TCC_LIBTCC1);
+
 #if TARGETOS_OpenBSD || TARGETOS_FreeBSD || TARGETOS_NetBSD
         /* add crt end if not memory output */
 	if (s1->output_type != TCC_OUTPUT_MEMORY) {
@@ -1553,7 +1574,9 @@ static void tcc_add_linker_symbols(TCCState *s1)
     set_global_sym(s1, "__global_pointer$", data_section, 0x800);
 #endif
     /* horrible new standard ldscript defines */
+#ifndef TCC_TARGET_PE
     add_init_array_defines(s1, ".preinit_array");
+#endif
     add_init_array_defines(s1, ".init_array");
     add_init_array_defines(s1, ".fini_array");
     /* add start and stop symbols for sections whose name can be
@@ -1931,8 +1954,6 @@ static int layout_sections(TCCState *s1, ElfW(Phdr) *phdr,
 	roinf->sh_offset = roinf->sh_addr = roinf->sh_size = 0;
 
         for(j = 0; j < phfill; j++) {
-	    Section *relocplt = s1->got ? s1->got->relocplt : NULL;
-
             ph->p_type = j == 2 ? PT_TLS : PT_LOAD;
             if (j == 0)
                 ph->p_flags = PF_R | PF_X;
@@ -1973,19 +1994,22 @@ static int layout_sections(TCCState *s1, ElfW(Phdr) *phdr,
                         if (k != 1)
                             continue;
                     } else if (s->sh_type == SHT_RELX) {
-                        if (k != 2 && s != relocplt)
-                            continue;
-                        else if (k != 3 && s == relocplt)
-                            continue;
+                        if (s1->plt && s == s1->plt->reloc) {
+                            if (k != 3)
+                                continue;
+                        } else {
+                            if (k != 2)
+                                continue;
+                        }
                     } else if (s->sh_type == SHT_NOBITS) {
                         if (k != 6)
                             continue;
-                    } else if (s == data_ro_section ||
+                    } else if ((s == rodata_section
 #ifdef CONFIG_TCC_BCHECK
-			       s == bounds_section ||
-			       s == lbounds_section ||
+		                || s == bounds_section
+                                || s == lbounds_section
 #endif
-                               0) {
+                                ) && (s->sh_flags & SHF_WRITE)) {
                         if (k != 4)
                             continue;
 			/* Align next section on page size.
@@ -2013,18 +2037,15 @@ static int layout_sections(TCCState *s1, ElfW(Phdr) *phdr,
                         ph->p_vaddr = addr;
                         ph->p_paddr = ph->p_vaddr;
                     }
-                    if (s == data_ro_section ||
-#ifdef CONFIG_TCC_BCHECK
-			s == bounds_section ||
-			s == lbounds_section ||
-#endif
-                        0) {
+
+                    if (k == 4) {
                         if (roinf->sh_size == 0) {
                             roinf->sh_offset = s->sh_offset;
                             roinf->sh_addr = s->sh_addr;
 			}
                         roinf->sh_size = (addr - roinf->sh_addr) + s->sh_size;
 		    }
+
                     addr += s->sh_size;
                     if (s->sh_type != SHT_NOBITS)
                         file_offset += s->sh_size;
@@ -2155,10 +2176,10 @@ static void fill_dynamic(TCCState *s1, struct dyn_inf *dyninf)
     put_dt(dynamic, DT_RELA, dyninf->rel_addr);
     put_dt(dynamic, DT_RELASZ, dyninf->rel_size);
     put_dt(dynamic, DT_RELAENT, sizeof(ElfW_Rel));
-    if (s1->got && s1->got->relocplt) {
+    if (s1->plt && s1->plt->reloc) {
         put_dt(dynamic, DT_PLTGOT, s1->got->sh_addr);
-        put_dt(dynamic, DT_PLTRELSZ, s1->got->relocplt->data_offset);
-        put_dt(dynamic, DT_JMPREL, s1->got->relocplt->sh_addr);
+        put_dt(dynamic, DT_PLTRELSZ, s1->plt->reloc->data_offset);
+        put_dt(dynamic, DT_JMPREL, s1->plt->reloc->sh_addr);
         put_dt(dynamic, DT_PLTREL, DT_RELA);
     }
     put_dt(dynamic, DT_RELACOUNT, 0);
@@ -2166,10 +2187,10 @@ static void fill_dynamic(TCCState *s1, struct dyn_inf *dyninf)
     put_dt(dynamic, DT_REL, dyninf->rel_addr);
     put_dt(dynamic, DT_RELSZ, dyninf->rel_size);
     put_dt(dynamic, DT_RELENT, sizeof(ElfW_Rel));
-    if (s1->got && s1->got->relocplt) {
+    if (s1->plt && s1->plt->reloc) {
         put_dt(dynamic, DT_PLTGOT, s1->got->sh_addr);
-        put_dt(dynamic, DT_PLTRELSZ, s1->got->relocplt->data_offset);
-        put_dt(dynamic, DT_JMPREL, s1->got->relocplt->sh_addr);
+        put_dt(dynamic, DT_PLTRELSZ, s1->plt->reloc->data_offset);
+        put_dt(dynamic, DT_JMPREL, s1->plt->reloc->sh_addr);
         put_dt(dynamic, DT_PLTREL, DT_REL);
     }
     put_dt(dynamic, DT_RELCOUNT, 0);
@@ -2208,38 +2229,6 @@ static void fill_dynamic(TCCState *s1, struct dyn_inf *dyninf)
     put_dt(dynamic, DT_NULL, 0);
 }
 
-/* Relocate remaining sections and symbols (that is those not related to
-   dynamic linking) */
-static int final_sections_reloc(TCCState *s1)
-{
-    int i;
-    Section *s;
-
-    relocate_syms(s1, s1->symtab, 0);
-
-    if (s1->nb_errors != 0)
-        return -1;
-
-    /* relocate sections */
-    /* XXX: ignore sections with allocated relocations ? */
-    for(i = 1; i < s1->nb_sections; i++) {
-        s = s1->sections[i];
-        if (s->reloc && (s != s1->got || s1->static_link))
-            relocate_section(s1, s);
-    }
-
-    /* relocate relocation entries if the relocation tables are
-       allocated in the executable */
-    for(i = 1; i < s1->nb_sections; i++) {
-        s = s1->sections[i];
-        if ((s->sh_flags & SHF_ALLOC) &&
-            s->sh_type == SHT_RELX) {
-            relocate_rel(s1, s);
-        }
-    }
-    return 0;
-}
-
 /* Remove gaps between RELX sections.
    These gaps are a result of final_sections_reloc. Here some relocs are removed.
    The gaps are then filled with 0 in tcc_output_elf. The 0 is intepreted as
@@ -2250,7 +2239,7 @@ static void update_reloc_sections(TCCState *s1, struct dyn_inf *dyninf)
     int i;
     unsigned long file_offset = 0;
     Section *s;
-    Section *relocplt = s1->got ? s1->got->relocplt : NULL;
+    Section *relocplt = s1->plt ? s1->plt->reloc : NULL;
 
     /* dynamic relocation table information, for .dynamic section */
     dyninf->rel_addr = dyninf->rel_size = 0;
@@ -2724,9 +2713,11 @@ static int elf_output_file(TCCState *s1, const char *filename)
 
         /* if building executable or DLL, then relocate each section
            except the GOT which is already relocated */
-        ret = final_sections_reloc(s1);
-        if (ret)
+        relocate_syms(s1, s1->symtab, 0);
+        ret = -1;
+        if (s1->nb_errors != 0)
             goto the_end;
+        relocate_sections(s1);
         if (dynamic) {
 	    update_reloc_sections (s1, &dyninf);
             dynamic->data_offset = dyninf.data_offset;

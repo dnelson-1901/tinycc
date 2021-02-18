@@ -1817,7 +1817,7 @@ static Sym *sym_copy(Sym *s0, Sym **ps)
 static void sym_copy_ref(Sym *s, Sym **ps)
 {
     int bt = s->type.t & VT_BTYPE;
-    if (bt == VT_FUNC || bt == VT_PTR) {
+    if (bt == VT_FUNC || bt == VT_PTR || (bt == VT_STRUCT && s->sym_scope)) {
         Sym **sp = &s->type.ref;
         for (s = *sp, *sp = NULL; s; s = s->next) {
             Sym *s2 = sym_copy(s, ps);
@@ -1918,6 +1918,7 @@ ST_FUNC void save_reg_upstack(int r, int n)
             } else {
                 p->r = VT_LVAL | VT_LOCAL;
             }
+            p->sym = NULL;
             p->r2 = VT_CONST;
             p->c.i = l;
         }
@@ -2355,7 +2356,7 @@ ST_FUNC int gv(int rc)
             (vtop->r & (VT_VALMASK | VT_LVAL)) == VT_CONST) {
             /* CPUs usually cannot use float constants, so we store them
                generically in data segment */
-            init_params p = { data_section };
+            init_params p = { rodata_section };
             unsigned long offset;
             size = type_size(&vtop->type, &align);
             if (NODATA_WANTED)
@@ -3094,11 +3095,12 @@ static void type_to_str(char *buf, int buf_size,
         pstrcat(buf, buf_size, "typedef ");
     if (t & VT_INLINE)
         pstrcat(buf, buf_size, "inline ");
-    if (t & VT_VOLATILE)
-        pstrcat(buf, buf_size, "volatile ");
-    if (t & VT_CONSTANT)
-        pstrcat(buf, buf_size, "const ");
-
+    if (bt != VT_PTR) {
+        if (t & VT_VOLATILE)
+            pstrcat(buf, buf_size, "volatile ");
+        if (t & VT_CONSTANT)
+            pstrcat(buf, buf_size, "const ");
+    }
     if (((t & VT_DEFSIGN) && bt == VT_BYTE)
         || ((t & VT_UNSIGNED)
             && (bt == VT_SHORT || bt == VT_INT || bt == VT_LLONG)
@@ -5931,18 +5933,22 @@ ST_FUNC void unary(void)
         /* fall thru */
     case TOK___FUNC__:
         {
+            Section *sec;
             void *ptr;
             int len;
             /* special function name identifier */
             len = strlen(funcname) + 1;
             /* generate char[len] type */
             type.t = VT_BYTE;
+            if (tcc_state->warn_write_strings)
+                type.t |= VT_CONSTANT;
             mk_pointer(&type);
             type.t |= VT_ARRAY;
             type.ref->c = len;
-            vpush_ref(&type, data_section, data_section->data_offset, len);
+            sec = rodata_section;
+            vpush_ref(&type, sec, sec->data_offset, len);
             if (!NODATA_WANTED) {
-                ptr = section_ptr_add(data_section, len);
+                ptr = section_ptr_add(sec, len);
                 memcpy(ptr, funcname, len);
             }
             next();
@@ -5967,6 +5973,7 @@ ST_FUNC void unary(void)
         mk_pointer(&type);
         type.t |= VT_ARRAY;
         memset(&ad, 0, sizeof(AttributeDef));
+        ad.section = rodata_section;
         decl_initializer_alloc(&type, &ad, VT_CONST, 2, 0, 0);
         break;
     case '(':
@@ -8033,10 +8040,10 @@ static void init_putv(init_params *p, CType *type, unsigned long c)
 		   includes relocations.  Use the fact that relocs are
 		   created it order, so look from the end of relocs
 		   until we hit one before the copied region.  */
-		int num_relocs = ssec->reloc->data_offset / sizeof(*rel);
-		rel = (ElfW_Rel*)(ssec->reloc->data + ssec->reloc->data_offset);
-		while (num_relocs--) {
-		    rel--;
+                unsigned long relofs = ssec->reloc->data_offset;
+		while (relofs >= sizeof(*rel)) {
+                    relofs -= sizeof(*rel);
+                    rel = (ElfW_Rel*)(ssec->reloc->data + relofs);
 		    if (rel->r_offset >= esym->st_value + size)
 		      continue;
 		    if (rel->r_offset < esym->st_value)
@@ -8236,6 +8243,7 @@ static void decl_initializer(init_params *p, CType *type, unsigned long c, int f
                 goto do_init_array;
             }
 
+            decl_design_flex(p, s, len);
             if (!(flags & DIF_SIZE_ONLY)) {
                 int nb = n;
                 if (len < nb)
@@ -8269,8 +8277,6 @@ static void decl_initializer(init_params *p, CType *type, unsigned long c, int f
                         init_putv(p, t1, c + i * size1);
                     }
                 }
-            } else {
-                decl_design_flex(p, s, len);
             }
         } else {
 
@@ -8374,7 +8380,7 @@ static void decl_initializer_alloc(CType *type, AttributeDef *ad, int r,
 
     Section *sec;
     Sym *flexible_array;
-    Sym *sym = NULL;
+    Sym *sym;
     int saved_nocode_wanted = nocode_wanted;
 #ifdef CONFIG_TCC_BCHECK
     int bcheck = tcc_state->do_bounds_check && !NODATA_WANTED;
@@ -8436,7 +8442,7 @@ static void decl_initializer_alloc(CType *type, AttributeDef *ad, int r,
         /* prepare second initializer parsing */
         macro_ptr = init_str->str;
         next();
-        
+
         /* if still unknown size, error */
         size = type_size(type, &align);
         if (size < 0) 
@@ -8503,10 +8509,19 @@ static void decl_initializer_alloc(CType *type, AttributeDef *ad, int r,
             vset(type, r, addr);
         }
     } else {
+	sym = NULL;
         if (v && scope == VT_CONST) {
             /* see if the symbol was already defined */
             sym = sym_find(v);
             if (sym) {
+                if (p.flex_array_ref && (sym->type.t & type->t & VT_ARRAY)
+                    && sym->type.ref->c > type->ref->c) {
+                    /* flex array was already declared with explicit size
+                            extern int arr[10];
+                            int arr[] = { 1,2,3 }; */
+                    type->ref->c = sym->type.ref->c;
+                    size = type_size(type, &align);
+                }
                 patch_storage(sym, ad, type);
                 /* we accept several definitions of the same global variable. */
                 if (!has_init && sym->c && elfsym(sym)->st_shndx != SHN_UNDEF)
@@ -8517,11 +8532,16 @@ static void decl_initializer_alloc(CType *type, AttributeDef *ad, int r,
         /* allocate symbol in corresponding section */
         sec = ad->section;
         if (!sec) {
-            if (type->t & VT_CONSTANT)
-		sec = data_ro_section;
-            else if (has_init)
+            CType *tp = type;
+            while ((tp->t & (VT_BTYPE|VT_ARRAY)) == (VT_PTR|VT_ARRAY))
+                tp = &tp->ref->type;
+            if (tp->t & VT_CONSTANT) {
+		sec = rodata_section;
+            } else if (has_init) {
 		sec = data_section;
-            else if (tcc_state->nocommon)
+                /*if (tcc_state->g_debug & 4)
+                    tcc_warning("rw data: %s", get_tok_str(v, 0));*/
+            } else if (tcc_state->nocommon)
                 sec = bss_section;
         }
 
