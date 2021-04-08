@@ -4068,7 +4068,7 @@ static void verify_assign_cast(CType *dt)
 		   base types, though, in particular for unsigned enums
 		   and signed int targets.  */
             } else {
-                tcc_warning("assignment from incompatible pointer type");
+                type_incompatibility_warning(type1, type2, "assignment to %s from incompatible pointer type %s");
                 break;
             }
         }

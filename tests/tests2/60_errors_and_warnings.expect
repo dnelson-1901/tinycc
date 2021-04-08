@@ -29,14 +29,14 @@
 60_errors_and_warnings.c:49: error: initializer element is not constant
 
 [test_pointer_assignment]
-60_errors_and_warnings.c:79: warning: assignment from incompatible pointer type
-60_errors_and_warnings.c:82: warning: assignment from incompatible pointer type
-60_errors_and_warnings.c:86: warning: assignment from incompatible pointer type
-60_errors_and_warnings.c:88: warning: assignment from incompatible pointer type
-60_errors_and_warnings.c:91: warning: assignment from incompatible pointer type
-60_errors_and_warnings.c:92: warning: assignment from incompatible pointer type
-60_errors_and_warnings.c:94: warning: assignment from incompatible pointer type
-60_errors_and_warnings.c:95: warning: assignment from incompatible pointer type
+60_errors_and_warnings.c:79: warning: assignment to struct s1 from incompatible pointer type struct s2
+60_errors_and_warnings.c:82: warning: assignment to void from incompatible pointer type void *
+60_errors_and_warnings.c:86: warning: assignment to enum e1 from incompatible pointer type enum e2
+60_errors_and_warnings.c:88: warning: assignment to int from incompatible pointer type extern enum e1
+60_errors_and_warnings.c:91: warning: assignment to unsigned int from incompatible pointer type extern enum e2
+60_errors_and_warnings.c:92: warning: assignment to unsigned int from incompatible pointer type extern enum e3
+60_errors_and_warnings.c:94: warning: assignment to long from incompatible pointer type int
+60_errors_and_warnings.c:95: warning: assignment to long from incompatible pointer type long long
 60_errors_and_warnings.c:98: warning: assignment discards qualifiers from pointer target type
 60_errors_and_warnings.c:99: warning: assignment discards qualifiers from pointer target type
 60_errors_and_warnings.c:103: warning: assignment discards qualifiers from pointer target type
@@ -152,7 +152,7 @@ bar  : 3 ; 3
 [test_var_4]
 
 [test_long_double_type_for_win32]
-60_errors_and_warnings.c:324: warning: assignment from incompatible pointer type
+60_errors_and_warnings.c:324: warning: assignment to long double from incompatible pointer type double
 
 [test_stray_backslash]
 60_errors_and_warnings.c:330: error: stray '\' in program
