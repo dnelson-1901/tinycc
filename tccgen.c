@@ -3210,20 +3210,25 @@ static void type_to_str(char *buf, int buf_size,
  no_var: ;
 }
 
+/* calls type_to_str, returns a pointer to one of four cycling buffers */
+static const char* type_to_strbuf(CType* t)
+{
+    static char buf[4][256];
+    static int bufnum = 0;
+    type_to_str(buf[bufnum], sizeof(buf[bufnum]), t, NULL);
+    char *rv = buf[bufnum];
+    bufnum = (bufnum + 1) & 3;
+    return rv;
+}
+
 static void type_incompatibility_error(CType* st, CType* dt, const char* fmt)
 {
-    char buf1[256], buf2[256];
-    type_to_str(buf1, sizeof(buf1), st, NULL);
-    type_to_str(buf2, sizeof(buf2), dt, NULL);
-    tcc_error(fmt, buf1, buf2);
+    tcc_error(fmt, type_to_strbuf(st), type_to_strbuf(dt));
 }
 
 static void type_incompatibility_warning(CType* st, CType* dt, const char* fmt)
 {
-    char buf1[256], buf2[256];
-    type_to_str(buf1, sizeof(buf1), st, NULL);
-    type_to_str(buf2, sizeof(buf2), dt, NULL);
-    tcc_warning(fmt, buf1, buf2);
+    tcc_warning(fmt, type_to_strbuf(st), type_to_strbuf(dt));
 }
 
 static int pointed_size(CType *type)
@@ -6363,11 +6368,9 @@ ST_FUNC void unary(void)
 	    if (tok == ')')
 		break;
 	}
-	if (!str) {
-	    char buf[60];
-	    type_to_str(buf, sizeof buf, &controlling_type, NULL);
-	    tcc_error("type '%s' does not match any association", buf);
-	}
+	if (!str)
+	    tcc_error("type '%s' does not match any association",
+	        type_to_strbuf(&controlling_type));
 	begin_macro(str, 1);
 	next();
 	expr_eq();
