@@ -517,7 +517,7 @@ static void create_symtab(TCCState *s1, struct macho *mo)
     }
     tcc_enter_state(s1);  /* qsort needs global state */
     qsort(pn, sym_end - 1, sizeof(*pn), machosymcmp);
-    tcc_exit_state();
+    tcc_exit_state(s1);
     mo->e2msym = tcc_malloc(sym_end * sizeof(*mo->e2msym));
     mo->e2msym[0] = -1;
     for (sym_index = 1; sym_index < sym_end; ++sym_index) {
@@ -837,7 +837,122 @@ static uint32_t macho_swap32(uint32_t x)
 }
 #define SWAP(x) (swap ? macho_swap32(x) : (x))
 
-ST_FUNC int macho_load_dll(TCCState *s1, int fd, const char *filename, int lev)
+ST_FUNC int macho_add_dllref(TCCState* s1, int lev, const char* soname)
+{
+     /* if the dll is already loaded, do not load it */
+    DLLReference *dllref;
+    int i;
+    for(i = 0; i < s1->nb_loaded_dlls; i++) {
+        dllref = s1->loaded_dlls[i];
+        if (!strcmp(soname, dllref->name)) {
+            /* but update level if needed */
+            if (lev < dllref->level)
+                dllref->level = lev;
+            return -1;
+        }
+    }
+    tcc_add_dllref(s1, soname)->level = lev;
+    return 0;
+}
+
+#define tbd_parse_movepast(s) \
+    (pos = (pos = strstr(pos, s)) ? pos + strlen(s) : NULL)
+#define tbd_parse_movetoany(cs) (pos = strpbrk(pos, cs))
+#define tbd_parse_skipws while (*pos && (*pos==' '||*pos=='\n')) ++pos
+#define tbd_parse_tramplequote if(*pos=='\''||*pos=='"') tbd_parse_trample
+#define tbd_parse_tramplespace if(*pos==' ') tbd_parse_trample
+#define tbd_parse_trample *pos++=0
+
+#ifdef TCC_IS_NATIVE
+/* Looks for the active developer SDK set by xcode-select (or the default
+   one set during installation.) */
+ST_FUNC void tcc_add_macos_sdkpath(TCCState* s)
+{
+    char *sdkroot = NULL, *pos = NULL;
+    void* xcs = dlopen("libxcselect.dylib", RTLD_GLOBAL | RTLD_LAZY);
+    CString path;
+    int (*f)(unsigned int, char**) = dlsym(xcs, "xcselect_host_sdk_path");
+    cstr_new(&path);
+    if (f) f(1, &sdkroot);
+    if (sdkroot)
+        pos = strstr(sdkroot,"SDKs/MacOSX");
+    if (pos)
+        cstr_printf(&path, "%.*s.sdk/usr/lib", (int)(pos - sdkroot + 11), sdkroot);
+    /* must use free from libc directly */
+#pragma push_macro("free")
+#undef free
+    free(sdkroot);
+#pragma pop_macro("free")
+    if (path.size)
+        tcc_add_library_path(s, (char*)path.data);
+    else
+        tcc_add_library_path(s,
+            "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/lib"
+            ":" "/Applications/Xcode.app/Developer/SDKs/MacOSX.sdk/usr/lib"
+            );
+    cstr_free(&path);
+}
+
+ST_FUNC const char* macho_tbd_soname(const char* filename) {
+    char *soname, *data, *pos;
+    const char *ret = filename;
+
+    int fd = open(filename,O_RDONLY);
+    if (fd<0) return ret;
+    pos = data = tcc_load_text(fd);
+    if (!tbd_parse_movepast("install-name: ")) goto the_end;
+    tbd_parse_skipws;
+    tbd_parse_tramplequote;
+    soname = pos;
+    if (!tbd_parse_movetoany("\n \"'")) goto the_end;
+    tbd_parse_trample;
+    ret = tcc_strdup(soname);
+the_end:
+    tcc_free(data);
+    return ret;
+}
+#endif /* TCC_IS_NATIVE */
+
+ST_FUNC int macho_load_tbd(TCCState* s1, int fd, const char* filename, int lev)
+{
+    char *soname, *data, *pos;
+    int ret = -1;
+
+    pos = data = tcc_load_text(fd);
+    if (!tbd_parse_movepast("install-name: ")) goto the_end;
+    tbd_parse_skipws;
+    tbd_parse_tramplequote;
+    soname = pos;
+    if (!tbd_parse_movetoany("\n \"'")) goto the_end;
+    tbd_parse_trample;
+    ret = 0;
+    if (macho_add_dllref(s1, lev, soname) != 0) goto the_end;
+    while(pos) {
+        char* sym = NULL;
+        int cont = 1;
+        if (!tbd_parse_movepast("symbols: ")) break;
+        if (!tbd_parse_movepast("[")) break;
+        while (cont) {
+            tbd_parse_skipws;
+            tbd_parse_tramplequote;
+            sym = pos;
+            if (!tbd_parse_movetoany(",] \"'")) break;
+            tbd_parse_tramplequote;
+            tbd_parse_tramplespace;
+            tbd_parse_skipws;
+            if (*pos==0||*pos==']') cont=0;
+            tbd_parse_trample;
+            set_elf_sym(s1->dynsymtab_section, 0, 0,
+                ELFW(ST_INFO)(STB_GLOBAL, STT_NOTYPE), 0, SHN_UNDEF, sym);
+        }
+    }
+
+the_end:
+    tcc_free(data);
+    return ret;
+}
+
+ST_FUNC int macho_load_dll(TCCState * s1, int fd, const char* filename, int lev)
 {
     unsigned char buf[sizeof(struct mach_header_64)];
     void *buf2;
@@ -853,7 +968,6 @@ ST_FUNC int macho_load_dll(TCCState *s1, int fd, const char *filename, int lev)
     uint32_t strsize = 0;
     uint32_t iextdef = 0;
     uint32_t nextdef = 0;
-    DLLReference *dllref;
 
   again:
     if (full_read(fd, buf, sizeof(buf)) != sizeof(buf))
@@ -934,20 +1048,8 @@ ST_FUNC int macho_load_dll(TCCState *s1, int fd, const char *filename, int lev)
         lc = (struct load_command*) ((char*)lc + lc->cmdsize);
     }
 
-    /* if the dll is already loaded, do not load it */
-    for(i = 0; i < s1->nb_loaded_dlls; i++) {
-        dllref = s1->loaded_dlls[i];
-        if (!strcmp(soname, dllref->name)) {
-            /* but update level if needed */
-            if (lev < dllref->level)
-                dllref->level = lev;
-            goto the_end;
-        }
-    }
-    dllref = tcc_mallocz(sizeof(DLLReference) + strlen(soname));
-    dllref->level = lev;
-    strcpy(dllref->name, soname);
-    dynarray_add(&s1->loaded_dlls, &s1->nb_loaded_dlls, dllref);
+    if (0 != macho_add_dllref(s1, lev, soname))
+        goto the_end;
 
     if (!nsyms || !nextdef)
       tcc_warning("%s doesn't export any symbols?", filename);

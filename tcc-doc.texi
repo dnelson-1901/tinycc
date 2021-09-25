@@ -267,11 +267,12 @@ Make string constants be of type @code{const char *} instead of @code{char
 *}.
 
 @item -Werror
-Abort compilation if warnings are issued.
+Abort compilation if a warning is issued. Can be given an option to enable
+the specified warning and turn it into an error, for example
+@option{-Werror=unsupported}.
 
 @item -Wall 
-Activate all warnings, except @option{-Werror}, @option{-Wunusupported} and
-@option{-Wwrite-strings}.
+Activate some useful warnings.
 
 @end table
 
@@ -375,8 +376,18 @@ to trigger a stack trace with a message on demand.
 Misc options:
 
 @table @option
+
+@item -M
+Just output makefile fragment with dependencies
+
+@item -MM
+Like -M except mention only user header files, not system header files.
+
 @item -MD
 Generate makefile fragment with dependencies.
+
+@item -MMD
+Like -MD except mention only user header files, not system header files.
 
 @item -MF depfile
 Use @file{depfile} as output for -MD.

@@ -97,7 +97,7 @@ static CString initstr;
 #define VT_PTRDIFF_T (VT_LONG | VT_LLONG)
 #endif
 
-ST_DATA struct switch_t {
+static struct switch_t {
     struct case_t {
         int64_t v1, v2;
 	int sym;
@@ -111,12 +111,12 @@ ST_DATA struct switch_t {
 
 #define MAX_TEMP_LOCAL_VARIABLE_NUMBER 8
 /*list of temporary local variables on the stack in current function. */
-ST_DATA struct temp_local_variable {
+static struct temp_local_variable {
 	int location; //offset on stack. Svalue.c.i
 	short size;
 	short align;
 } arr_temp_local_vars[MAX_TEMP_LOCAL_VARIABLE_NUMBER];
-short nb_temp_local_vars;
+static int nb_temp_local_vars;
 
 static struct scope {
     struct scope *prev;
@@ -131,6 +131,11 @@ typedef struct {
     int local_offset;
     Sym *flex_array_ref;
 } init_params;
+
+#if 1
+#define precedence_parser
+static void init_prec(void);
+#endif
 
 /********************************************************/
 /* stab debug support */
@@ -215,23 +220,6 @@ static struct {
 } tcov_data;
 
 /********************************************************/
-#if 1
-#define precedence_parser
-static void init_prec(void);
-#endif
-/********************************************************/
-#ifndef CONFIG_TCC_ASM
-ST_FUNC void asm_instr(void)
-{
-    tcc_error("inline asm() not supported");
-}
-ST_FUNC void asm_global_instr(void)
-{
-    tcc_error("inline asm() not supported");
-}
-#endif
-
-/* ------------------------------------------------------------------------- */
 static void gen_cast(CType *type);
 static void gen_cast_s(int t);
 static inline CType *pointed_type(CType *type);
@@ -849,7 +837,7 @@ static void tcc_tcov_block_begin(void)
 	    cstr_printf (&cstr, "%s/%s", wd, file->true_filename);
 	}
 	ptr = section_ptr_add(tcov_section, cstr.size + 1);
-	strncpy((char *)ptr, cstr.data, cstr.size);
+	strcpy((char *)ptr, cstr.data);
 #ifdef _WIN32
         normalize_slashes((char *)ptr);
 #endif
@@ -865,7 +853,7 @@ static void tcc_tcov_block_begin(void)
 	tcov_data.last_func_name = tcov_section->data_offset;
 	len = strlen (funcname);
 	ptr = section_ptr_add(tcov_section, len + 1);
-	strncpy((char *)ptr, funcname, len);
+	strcpy((char *)ptr, funcname);
 	section_ptr_add(tcov_section, -tcov_section->data_offset & 7);
 	ptr = section_ptr_add(tcov_section, 8);
 	write64le (ptr, file->line_num);
@@ -3700,6 +3688,12 @@ again:
         df = is_float(dbt);
         dbt_bt = dbt & VT_BTYPE;
         sbt_bt = sbt & VT_BTYPE;
+        if (dbt_bt == VT_VOID)
+            goto done;
+        if (sbt_bt == VT_VOID) {
+error:
+            cast_error(&vtop->type, type);
+        }
 
         c = (vtop->r & (VT_VALMASK | VT_LVAL | VT_SYM)) == VT_CONST;
 #if !defined TCC_IS_NATIVE && !defined TCC_IS_NATIVE_387
@@ -3796,11 +3790,9 @@ again:
 
         ds = btype_size(dbt_bt);
         ss = btype_size(sbt_bt);
-        if (ds == 0 || ss == 0) {
-            if (dbt_bt == VT_VOID)
-                goto done;
-            cast_error(&vtop->type, type);
-        }
+        if (ds == 0 || ss == 0)
+            goto error;
+
         if (IS_ENUM(type->t) && type->ref->c < 0)
             tcc_error("cast to incomplete type");
 
@@ -4078,7 +4070,7 @@ static void verify_assign_cast(CType *dt)
             }
         }
         if (qualwarn)
-            tcc_warning("assignment discards qualifiers from pointer target type");
+            tcc_warning_c(warn_discarded_qualifiers)("assignment discards qualifiers from pointer target type");
         break;
     case VT_BYTE:
     case VT_SHORT:
@@ -4356,9 +4348,9 @@ redo:
 	    skip('(');
 	    s = sym_find(tok);
 	    if (!s) {
-	      tcc_warning("implicit declaration of function '%s'",
-			  get_tok_str(tok, &tokc));
-	      s = external_global_sym(tok, &func_old_type);
+	        tcc_warning_c(warn_implicit_function_declaration)(
+                    "implicit declaration of function '%s'", get_tok_str(tok, &tokc));
+	        s = external_global_sym(tok, &func_old_type);
             } else if ((s->type.t & VT_BTYPE) != VT_FUNC)
                 tcc_error("'%s' is not declared as function", get_tok_str(tok, &tokc));
 	    ad->cleanup_func = s;
@@ -4507,8 +4499,7 @@ redo:
             ad->a.dllimport = 1;
             break;
         default:
-            if (tcc_state->warn_unsupported)
-                tcc_warning("'%s' attribute ignored", get_tok_str(t, NULL));
+            tcc_warning_c(warn_unsupported)("'%s' attribute ignored", get_tok_str(t, NULL));
             /* skip parameters */
             if (tok == '(') {
                 int parenthesis = 0;
@@ -5739,139 +5730,110 @@ static void parse_builtin_params(int nc, const char *args)
         nocode_wanted--;
 }
 
-static inline int is_memory_model(const SValue *sv)
-{
-    /*
-     * FIXME
-     * The memory models should better be backed by an enumeration.
-     *
-     *    const int t = sv->type.t;
-     *
-     *    if (!IS_ENUM_VAL(t))
-     *        return 0;
-     *
-     *    if (!(t & VT_STATIC))
-     *        return 0;
-     *
-     * Ideally we should check whether the model matches 1:1.
-     * If it is possible, we should check by the name of the value.
-     */
-    return (((sv->type.t & VT_BTYPE) == VT_INT) && (sv->c.i < 6));
-}
-
 static void parse_atomic(int atok)
 {
-    size_t op;
-    size_t arg;
-    size_t argc;
-    CType *atom = NULL;
-    char const *params = NULL;
-    static struct {
-        int const tok;
-        char const *const params;
-    } const ops[] = {
+    int size, align, arg;
+    CType *atom, *atom_ptr, ct = {0};
+    char buf[40];
+    static const char *const templates[] = {
         /*
-         * a -- atomic
-         * A -- read-only atomic
-         * p -- pointer to memory
-         * P -- pointer to read-only memory
-         * v -- value
-         * m -- memory model
+         * Each entry consists of callback and function template.
+         * The template represents argument types and return type.
+         *
+         * ? void (return-only)
+         * b bool
+         * a atomic
+         * A read-only atomic
+         * p pointer to memory
+         * v value
+         * m memory model
          */
-        {TOK___c11_atomic_init, "-av"},
-        {TOK___c11_atomic_store, "-avm"},
-        {TOK___c11_atomic_load, "am"},
-        {TOK___c11_atomic_exchange, "avm"},
-        {TOK___c11_atomic_compare_exchange_strong, "apvmm"},
-        {TOK___c11_atomic_compare_exchange_weak, "apvmm"},
-        {TOK___c11_atomic_fetch_add, "avm"},
-        {TOK___c11_atomic_fetch_sub, "avm"},
-        {TOK___c11_atomic_fetch_or, "avm"},
-        {TOK___c11_atomic_fetch_xor, "avm"},
-        {TOK___c11_atomic_fetch_and, "avm"},
+
+        /* keep in order of appearance in tcctok.h: */
+        /* __atomic_store */            "avm.?",
+        /* __atomic_load */             "Am.v",
+        /* __atomic_exchange */         "avm.v",
+        /* __atomic_compare_exchange */ "apvbmm.b",
+        /* __atomic_fetch_add */        "avm.v",
+        /* __atomic_fetch_sub */        "avm.v",
+        /* __atomic_fetch_or */         "avm.v",
+        /* __atomic_fetch_xor */        "avm.v",
+        /* __atomic_fetch_and */        "avm.v"
     };
+    const char *template = templates[(atok - TOK___atomic_store)];
 
+    atom = atom_ptr = NULL;
+    size = 0; /* pacify compiler */
     next();
-
-    for (op = 0; op < (sizeof(ops) / sizeof(*ops)); ++op) {
-        if (ops[op].tok == atok) {
-            params = ops[op].params;
-            break;
-        }
-    }
-    if (!params)
-        tcc_error("unknown atomic operation");
-
-    argc = strlen(params);
-    if (params[0] == '-') {
-        ++params;
-        --argc;
-    }
-
-    vpushi(0);
-    vpushi(0); /* function address */
-
     skip('(');
-    for (arg = 0; arg < argc; ++arg) {
+    for (arg = 0;;) {
         expr_eq();
-
-        switch (params[arg]) {
+        switch (template[arg]) {
         case 'a':
         case 'A':
-            if (atom)
-                expect_arg("exactly one pointer to atomic", arg);
-            if ((vtop->type.t & VT_BTYPE) != VT_PTR)
-                expect_arg("pointer to atomic expected", arg);
-            atom = pointed_type(&vtop->type);
-            if (!(atom->t & VT_ATOMIC))
-                expect_arg("qualified pointer to atomic", arg);
-            if ((params[arg] == 'a') && (atom->t & VT_CONSTANT))
-                expect_arg("pointer to writable atomic", arg);
-            atom->t &= ~VT_ATOMIC;
-            switch (btype_size(atom->t & VT_BTYPE)) {
-            case 1: atok += 1; break;
-            case 2: atok += 2; break;
-            case 4: atok += 3; break;
-            case 8: atok += 4; break;
-            default: tcc_error("only integer-sized types are supported");
-            }
-            vswap();
-            vpop();
-            vpush_helper_func(atok);
-            vswap();
+            atom_ptr = &vtop->type;
+            if ((atom_ptr->t & VT_BTYPE) != VT_PTR)
+                expect("pointer");
+            atom = pointed_type(atom_ptr);
+            size = type_size(atom, &align);
+            if (size > 8
+                || (size & (size - 1))
+                || (atok > TOK___atomic_compare_exchange
+                    && (0 == btype_size(atom->t & VT_BTYPE)
+                        || (atom->t & VT_BTYPE) == VT_PTR)))
+                expect("integral or integer-sized pointer target type");
+            /* GCC does not care either: */
+            /* if (!(atom->t & VT_ATOMIC))
+                tcc_warning("pointer target declaration is missing '_Atomic'"); */
             break;
 
         case 'p':
-            if (((vtop->type.t & VT_BTYPE) != VT_PTR)
-                || !is_compatible_unqualified_types(atom, pointed_type(&vtop->type)))
-                expect_arg("pointer to compatible type", arg);
+            if ((vtop->type.t & VT_BTYPE) != VT_PTR
+             || type_size(pointed_type(&vtop->type), &align) != size)
+                tcc_error("pointer target type mismatch in argument %d", arg + 1);
+            gen_assign_cast(atom_ptr);
             break;
-
         case 'v':
-            if (!is_integer_btype(vtop->type.t & VT_BTYPE))
-                expect_arg("integer type", arg);
+            gen_assign_cast(atom);
             break;
-
         case 'm':
-            if (!is_memory_model(vtop))
-                expect_arg("memory model", arg);
-            vtop->type.t &= ~VT_MEMMODEL;
+            gen_assign_cast(&int_type);
             break;
-
-        default:
-            tcc_error("unknown parameter type");
+        case 'b':
+            ct.t = VT_BOOL;
+            gen_assign_cast(&ct);
+            break;
         }
-        if (tok == ')')
+        if ('.' == template[++arg])
             break;
         skip(',');
     }
-    if (arg < (argc - 1))
-        expect("more parameters");
-    if (arg > (argc - 1))
-        expect("less parameters");
     skip(')');
 
-    gfunc_call(argc);
+    ct.t = VT_VOID;
+    switch (template[arg + 1]) {
+    case 'b':
+        ct.t = VT_BOOL;
+        break;
+    case 'v':
+        ct = *atom;
+        break;
+    }
+
+    sprintf(buf, "%s_%d", get_tok_str(atok, 0), size);
+    vpush_helper_func(tok_alloc_const(buf));
+    vrott(arg + 1);
+    gfunc_call(arg);
+
+    vpush(&ct);
+    PUT_R_RET(vtop, ct.t);
+    if (ct.t == VT_BOOL) {
+#ifdef PROMOTE_RET
+	vtop->r |= BFVAL(VT_MUSTCAST, 1);
+#else
+	vtop->type.t = VT_INT;
+#endif
+    }
 }
 
 ST_FUNC void unary(void)
@@ -5939,23 +5901,20 @@ ST_FUNC void unary(void)
     case TOK___FUNC__:
         {
             Section *sec;
-            void *ptr;
             int len;
             /* special function name identifier */
             len = strlen(funcname) + 1;
             /* generate char[len] type */
-            type.t = VT_BYTE;
-            if (tcc_state->warn_write_strings)
+            type.t = char_type.t;
+            if (tcc_state->warn_write_strings & WARN_ON)
                 type.t |= VT_CONSTANT;
             mk_pointer(&type);
             type.t |= VT_ARRAY;
             type.ref->c = len;
             sec = rodata_section;
             vpush_ref(&type, sec, sec->data_offset, len);
-            if (!NODATA_WANTED) {
-                ptr = section_ptr_add(sec, len);
-                memcpy(ptr, funcname, len);
-            }
+            if (!NODATA_WANTED)
+                memcpy(section_ptr_add(sec, len), funcname, len);
             next();
         }
         break;
@@ -5968,11 +5927,9 @@ ST_FUNC void unary(void)
         goto str_init;
     case TOK_STR:
         /* string parsing */
-        t = VT_BYTE;
-        if (tcc_state->char_is_unsigned)
-            t = VT_BYTE | VT_UNSIGNED;
+        t = char_type.t;
     str_init:
-        if (tcc_state->warn_write_strings)
+        if (tcc_state->warn_write_strings & WARN_ON)
             t |= VT_CONSTANT;
         type.t = t;
         mk_pointer(&type);
@@ -6256,17 +6213,15 @@ ST_FUNC void unary(void)
 #endif
 
     /* atomic operations */
-    case TOK___c11_atomic_init:
-    case TOK___c11_atomic_store:
-    case TOK___c11_atomic_load:
-    case TOK___c11_atomic_exchange:
-    case TOK___c11_atomic_compare_exchange_strong:
-    case TOK___c11_atomic_compare_exchange_weak:
-    case TOK___c11_atomic_fetch_add:
-    case TOK___c11_atomic_fetch_sub:
-    case TOK___c11_atomic_fetch_or:
-    case TOK___c11_atomic_fetch_xor:
-    case TOK___c11_atomic_fetch_and:
+    case TOK___atomic_store:
+    case TOK___atomic_load:
+    case TOK___atomic_exchange:
+    case TOK___atomic_compare_exchange:
+    case TOK___atomic_fetch_add:
+    case TOK___atomic_fetch_sub:
+    case TOK___atomic_fetch_or:
+    case TOK___atomic_fetch_xor:
+    case TOK___atomic_fetch_and:
         parse_atomic(tok);
         break;
 
@@ -6408,14 +6363,8 @@ special_math_val:
                 tcc_error("'%s' undeclared", name);
             /* for simple function calls, we tolerate undeclared
                external reference to int() function */
-            if (tcc_state->warn_implicit_function_declaration
-#ifdef TCC_TARGET_PE
-                /* people must be warned about using undeclared WINAPI functions
-                   (which usually start with uppercase letter) */
-                || (name[0] >= 'A' && name[0] <= 'Z')
-#endif
-            )
-                tcc_warning("implicit declaration of function '%s'", name);
+            tcc_warning_c(warn_implicit_function_declaration)(
+                "implicit declaration of function '%s'", name);
             s = external_global_sym(t, &func_old_type);
         }
 
@@ -7289,7 +7238,7 @@ static void vla_leave(struct scope *o)
 /* ------------------------------------------------------------------------- */
 /* local scopes */
 
-void new_scope(struct scope *o)
+static void new_scope(struct scope *o)
 {
     /* copy and link previous scope */
     *o = *cur_scope;
@@ -7306,7 +7255,7 @@ void new_scope(struct scope *o)
         tcc_debug_stabn(tcc_state, N_LBRAC, ind - func_ind);
 }
 
-void prev_scope(struct scope *o, int is_expr)
+static void prev_scope(struct scope *o, int is_expr)
 {
     vla_leave(o->prev);
 
@@ -7334,7 +7283,7 @@ void prev_scope(struct scope *o, int is_expr)
 }
 
 /* leave a scope via break/continue(/goto) */
-void leave_scope(struct scope *o)
+static void leave_scope(struct scope *o)
 {
     if (!o)
         return;
@@ -7680,12 +7629,10 @@ again:
 
     block_after_label:
             vla_restore(cur_scope->vla.loc);
-            /* we accept this, but it is a mistake */
-            if (tok == '}') {
-                tcc_warning("deprecated use of label at end of compound statement");
-            } else {
+            if (tok != '}')
                 goto again;
-            }
+            /* we accept this, but it is a mistake */
+            tcc_warning_c(warn_all)("deprecated use of label at end of compound statement");
 
         } else {
             /* expression case */

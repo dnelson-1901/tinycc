@@ -394,4 +394,26 @@ struct S2 {
 #elif defined test_conflicting_array_definition
 extern int array[2];
 int array[] = { 1, 2, 3 };
+
+#elif defined test_cast_from_void
+void v() {}
+int f() { return v(); }
+
+#elif defined test_switch_W1 || defined test_switch_W2 \
+   || defined test_switch_W3 || defined test_switch_W4
+#if defined test_switch_W1
+#pragma comment(option, "-Wall")
+#elif defined test_switch_W2
+#pragma comment(option, "-Wunsupported -Wno-implicit-function-declaration -Wstuff")
+#elif defined test_switch_W3
+#pragma comment(option, "-Wwrite-strings -Werror=discarded-qualifiers")
+#elif defined test_switch_W4
+#pragma comment(option, "-Wunsupported -Wno-error=implicit-function-declaration -Werror")
+#endif
+void func()
+{
+    char *ccp = "123";
+    fink();
+}
+__attribute__((stuff)) int fink() {return 0;}
 #endif

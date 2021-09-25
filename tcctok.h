@@ -1,3 +1,4 @@
+/*********************************************************************/
 /* keywords */
      DEF(TOK_INT, "int")
      DEF(TOK_VOID, "void")
@@ -177,27 +178,17 @@
      DEF(TOK_builtin_va_start, "__builtin_va_start")
 #endif
 
-#define DEF_ATOMIC(id, str) \
-     DEF(id, str) \
-     DEF(id##_8, str "_8") \
-     DEF(id##_16, str "_16") \
-     DEF(id##_32, str "_32") \
-     DEF(id##_64, str "_64")
-
 /* atomic operations */
-     DEF_ATOMIC(TOK___c11_atomic_init, "__c11_atomic_init")
-     DEF_ATOMIC(TOK___c11_atomic_store, "__c11_atomic_store")
-     DEF_ATOMIC(TOK___c11_atomic_load, "__c11_atomic_load")
-     DEF_ATOMIC(TOK___c11_atomic_exchange, "__c11_atomic_exchange")
-     DEF_ATOMIC(TOK___c11_atomic_compare_exchange_strong, "__c11_atomic_compare_exchange_strong")
-     DEF_ATOMIC(TOK___c11_atomic_compare_exchange_weak, "__c11_atomic_compare_exchange_weak")
-     DEF_ATOMIC(TOK___c11_atomic_fetch_add, "__c11_atomic_fetch_add")
-     DEF_ATOMIC(TOK___c11_atomic_fetch_sub, "__c11_atomic_fetch_sub")
-     DEF_ATOMIC(TOK___c11_atomic_fetch_or, "__c11_atomic_fetch_or")
-     DEF_ATOMIC(TOK___c11_atomic_fetch_xor, "__c11_atomic_fetch_xor")
-     DEF_ATOMIC(TOK___c11_atomic_fetch_and, "__c11_atomic_fetch_and")
-
-#undef DEF_ATOMIC
+#define DEF_ATOMIC(ID) DEF(TOK_##__##ID, "__"#ID)
+     DEF_ATOMIC(atomic_store)
+     DEF_ATOMIC(atomic_load)
+     DEF_ATOMIC(atomic_exchange)
+     DEF_ATOMIC(atomic_compare_exchange)
+     DEF_ATOMIC(atomic_fetch_add)
+     DEF_ATOMIC(atomic_fetch_sub)
+     DEF_ATOMIC(atomic_fetch_or)
+     DEF_ATOMIC(atomic_fetch_xor)
+     DEF_ATOMIC(atomic_fetch_and)
 
 /* pragma */
      DEF(TOK_pack, "pack")
@@ -356,8 +347,17 @@
      DEF(TOK_longjmp, "longjmp")
 #endif
 
+
+/*********************************************************************/
 /* Tiny Assembler */
- DEF_ASMDIR(byte)              /* must be first directive */
+#define DEF_ASM(x) DEF(TOK_ASM_ ## x, #x)
+#define DEF_ASMDIR(x) DEF(TOK_ASMDIR_ ## x, "." #x)
+#define TOK_ASM_int TOK_INT
+
+#define TOK_ASMDIR_FIRST TOK_ASMDIR_byte
+#define TOK_ASMDIR_LAST TOK_ASMDIR_section
+
+ DEF_ASMDIR(byte)       /* must be first directive */
  DEF_ASMDIR(word)
  DEF_ASMDIR(align)
  DEF_ASMDIR(balign)
@@ -396,11 +396,16 @@
  DEF_ASMDIR(short)
  DEF_ASMDIR(long)
  DEF_ASMDIR(int)
- DEF_ASMDIR(section)            /* must be last directive */
+ DEF_ASMDIR(section)    /* must be last directive */
 
 #if defined TCC_TARGET_I386 || defined TCC_TARGET_X86_64
 #include "i386-tok.h"
 #endif
+
 #if defined TCC_TARGET_ARM || defined TCC_TARGET_ARM64
 #include "arm-tok.h"
+#endif
+
+#if defined TCC_TARGET_RISCV64
+#include "riscv64-tok.h"
 #endif
