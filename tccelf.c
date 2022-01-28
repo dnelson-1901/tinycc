@@ -1537,6 +1537,7 @@ ST_FUNC void tcc_add_runtime(TCCState *s1)
         if (TCC_LIBTCC1[0])
             tcc_add_support(s1, TCC_LIBTCC1);
 
+#if !defined TCC_TARGET_PE && !defined TCC_TARGET_MACHO
 #if TARGETOS_OpenBSD || TARGETOS_FreeBSD || TARGETOS_NetBSD
         /* add crt end if not memory output */
 	if (s1->output_type != TCC_OUTPUT_MEMORY) {
@@ -1552,6 +1553,7 @@ ST_FUNC void tcc_add_runtime(TCCState *s1)
         /* add crt end if not memory output */
         if (s1->output_type != TCC_OUTPUT_MEMORY)
             tcc_add_crt(s1, "crtn.o");
+#endif
 #endif
     }
 }
@@ -3487,6 +3489,8 @@ ST_FUNC int tcc_load_dll(TCCState *s1, int fd, const char *filename, int level)
     for(i = 0, dt = dynamic; i < nb_dts; i++, dt++) {
         if (dt->d_tag == DT_SONAME) {
             soname = dynstr + dt->d_un.d_val;
+        } else if (dt->d_tag == DT_RPATH) {
+            tcc_add_library_path(s1, dynstr + dt->d_un.d_val);
         }
     }
 
