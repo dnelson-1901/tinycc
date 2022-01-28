@@ -3747,6 +3747,7 @@ static void tcc_predefs(TCCState *s1, CString *cs, int is_asm)
 
     sscanf(TCC_VERSION, "%d.%d.%d", &a, &b, &c);
     cstr_printf(cs, "#define __TINYC__ %d\n", a*10000 + b*100 + c);
+    putdef(cs, "__VERSION__ \"" TCC_VERSION "\"");
     for (a = 0; defs[a]; ++a)
         for (p = defs[a]; *p; p = strchr(p, 0) + 1)
             putdef(cs, p);
