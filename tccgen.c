@@ -5338,6 +5338,8 @@ static int post_type(CType *type, AttributeDef *ad, int storage, int td)
     Sym **plast, *s, *first;
     AttributeDef ad1;
     CType pt;
+    TokenString *vla_array_tok = NULL;
+    int *vla_array_str = NULL;
 
     if (tok == '(') {
         /* function type, or recursive declarator (return if so) */
@@ -5446,8 +5448,33 @@ static int post_type(CType *type, AttributeDef *ad, int storage, int td)
 		break;
 	    }
             if (tok != ']') {
+		int nest = 1;
+
+		/* Code generation is not done now but has to be done
+		   at start of function. Save code here for later use. */
 	        nocode_wanted = 1;
-	        gexpr(), vpop();
+		vla_array_tok = tok_str_alloc();
+		for (;;) {
+		    if (tok == ']') {
+			nest--;
+			if (nest == 0)
+			    break;
+		    }
+		    if (tok == '[')
+			nest++;
+		    tok_str_add_tok(vla_array_tok);
+		    next();
+		}
+		unget_tok(0);
+		tok_str_add(vla_array_tok, -1);
+		tok_str_add(vla_array_tok, 0);
+		vla_array_str = vla_array_tok->str;
+		begin_macro(vla_array_tok, 2);
+		next();
+	        gexpr();
+		end_macro();
+		next();
+		goto check;
             }
             break;
 
@@ -5462,6 +5489,7 @@ static int post_type(CType *type, AttributeDef *ad, int storage, int td)
 		nocode_wanted = 0;
 		gexpr();
 	    }
+check:
             if ((vtop->r & (VT_VALMASK | VT_LVAL | VT_SYM)) == VT_CONST) {
                 n = vtop->c.i;
                 if (n < 0)
@@ -5475,7 +5503,7 @@ static int post_type(CType *type, AttributeDef *ad, int storage, int td)
         }
         skip(']');
         /* parse next post type */
-        post_type(type, ad, storage, td & ~(TYPE_DIRECT|TYPE_ABSTRACT));
+        post_type(type, ad, storage, (td & ~(TYPE_DIRECT|TYPE_ABSTRACT)) | TYPE_NEST);
 
         if ((type->t & VT_BTYPE) == VT_FUNC)
             tcc_error("declaration of an array of functions");
@@ -5486,17 +5514,21 @@ static int post_type(CType *type, AttributeDef *ad, int storage, int td)
         t1 |= type->t & VT_VLA;
 
         if (t1 & VT_VLA) {
-            if (n < 0)
-              tcc_error("need explicit inner array size in VLAs");
-            loc -= type_size(&int_type, &align);
-            loc &= -align;
-            n = loc;
+            if (n < 0) {
+		if  (td & TYPE_NEST)
+                    tcc_error("need explicit inner array size in VLAs");
+	    }
+	    else {
+                loc -= type_size(&int_type, &align);
+                loc &= -align;
+                n = loc;
 
-            vpush_type_size(type, &align);
-            gen_op('*');
-            vset(&int_type, VT_LOCAL|VT_LVAL, n);
-            vswap();
-            vstore();
+                vpush_type_size(type, &align);
+                gen_op('*');
+                vset(&int_type, VT_LOCAL|VT_LVAL, n);
+                vswap();
+                vstore();
+	    }
         }
         if (n != -1)
             vpop();
@@ -5507,6 +5539,12 @@ static int post_type(CType *type, AttributeDef *ad, int storage, int td)
         s = sym_push(SYM_FIELD, type, 0, n);
         type->t = (t1 ? VT_VLA : VT_ARRAY) | VT_PTR;
         type->ref = s;
+	if (vla_array_str) {
+	    if (t1 & VT_VLA)
+	        s->vla_array_str = vla_array_str;
+	    else
+	        tok_str_free_str(vla_array_str);
+	}
     }
     return 1;
 }
@@ -8593,6 +8631,46 @@ static void decl_initializer_alloc(CType *type, AttributeDef *ad, int r,
     nocode_wanted = saved_nocode_wanted;
 }
 
+/* generate vla code saved in post_type() */
+static void func_vla_arg_code(Sym *arg)
+{
+    int align;
+    TokenString *vla_array_tok = NULL;
+
+    if (arg->type.ref)
+        func_vla_arg_code(arg->type.ref);
+
+    if (arg->type.t & VT_VLA) {
+	loc -= type_size(&int_type, &align);
+	loc &= -align;
+	arg->type.ref->c = loc;
+
+	unget_tok(0);
+	vla_array_tok = tok_str_alloc();
+	vla_array_tok->str = arg->type.ref->vla_array_str;
+	begin_macro(vla_array_tok, 1);
+	next();
+	gexpr();
+	end_macro();
+	next();
+	vpush_type_size(&arg->type.ref->type, &align);
+	gen_op('*');
+	vset(&int_type, VT_LOCAL|VT_LVAL, arg->type.ref->c);
+	vswap();
+	vstore();
+	vpop();
+    }
+}
+
+static void func_vla_arg(Sym *sym)
+{
+    Sym *arg;
+
+    for (arg = sym->type.ref->next; arg; arg = arg->next)
+	if (arg->type.t & VT_VLA)
+	    func_vla_arg_code(arg);
+}
+
 /* parse a function defined by symbol 'sym' and generate its code in
    'cur_text_section' */
 static void gen_function(Sym *sym)
@@ -8627,6 +8705,7 @@ static void gen_function(Sym *sym)
     local_scope = 0;
     rsym = 0;
     clear_temp_local_var_list();
+    func_vla_arg(sym);
     block(0);
     gsym(rsym);
     nocode_wanted = 0;
