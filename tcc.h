@@ -258,7 +258,9 @@ extern long double strtold (const char *__nptr, char **__endptr);
 
 /* path to find crt1.o, crti.o and crtn.o */
 #ifndef CONFIG_TCC_CRTPREFIX
-# define CONFIG_TCC_CRTPREFIX USE_TRIPLET(CONFIG_SYSROOT "/usr/" CONFIG_LDDIR)
+# define CONFIG_TCC_CRTPREFIX \
+        ALSO_TRIPLET(CONFIG_SYSROOT "/usr/" CONFIG_LDDIR) \
+    ":" USE_TRIPLET(CONFIG_SYSROOT "/usr") "/lib"
 #endif
 
 #ifndef CONFIG_USR_INCLUDE
@@ -275,6 +277,8 @@ extern long double strtold (const char *__nptr, char **__endptr);
 #  define CONFIG_TCC_SYSINCLUDEPATHS \
         "{B}/include" \
     ":" ALSO_TRIPLET(CONFIG_SYSROOT "/usr/local/include") \
+    ":" USE_TRIPLET(CONFIG_SYSROOT "/usr") "/include" \
+    ":" USE_TRIPLET(CONFIG_SYSROOT "/usr/local") "/include" \
     ":" ALSO_TRIPLET(CONFIG_SYSROOT CONFIG_USR_INCLUDE)
 # endif
 #endif
@@ -286,6 +290,8 @@ extern long double strtold (const char *__nptr, char **__endptr);
 # else
 #  define CONFIG_TCC_LIBPATHS \
         ALSO_TRIPLET(CONFIG_SYSROOT "/usr/" CONFIG_LDDIR) \
+    ":" USE_TRIPLET(CONFIG_SYSROOT "/usr") "/lib" \
+    ":" USE_TRIPLET(CONFIG_SYSROOT "/usr/local") "/lib" \
     ":" ALSO_TRIPLET(CONFIG_SYSROOT "/" CONFIG_LDDIR) \
     ":" ALSO_TRIPLET(CONFIG_SYSROOT "/usr/local/" CONFIG_LDDIR)
 # endif
@@ -362,6 +368,7 @@ extern long double strtold (const char *__nptr, char **__endptr);
 #include "libtcc.h"
 #include "elf.h"
 #include "stab.h"
+#include "dwarf.h"
 
 /* -------------------------------------------- */
 
@@ -786,6 +793,7 @@ struct TCCState {
 
     /* compile with debug symbol (and use them if error during execution) */
     unsigned char do_debug;
+    unsigned char dwarf;
     unsigned char do_backtrace;
 #ifdef CONFIG_TCC_BCHECK
     /* compile with built-in memory and bounds checker */
@@ -916,6 +924,12 @@ struct TCCState {
     Section *symtab_section;
     /* debug sections */
     Section *stab_section;
+    Section *dwarf_info_section;
+    Section *dwarf_abbrev_section;
+    Section *dwarf_line_section;
+    Section *dwarf_aranges_section;
+    Section *dwarf_str_section;
+    Section *dwarf_line_str_section;
     /* Is there a new undefined sym since last new_undef_sym() */
     int new_undef_sym;
 
@@ -1818,6 +1832,12 @@ ST_FUNC void post_sem(TCCSem *p);
 #define symtab_section      TCC_STATE_VAR(symtab_section)
 #define stab_section        TCC_STATE_VAR(stab_section)
 #define stabstr_section     stab_section->link
+#define dwarf_info_section  TCC_STATE_VAR(dwarf_info_section)
+#define dwarf_abbrev_section TCC_STATE_VAR(dwarf_abbrev_section)
+#define dwarf_line_section  TCC_STATE_VAR(dwarf_line_section)
+#define dwarf_aranges_section TCC_STATE_VAR(dwarf_aranges_section)
+#define dwarf_str_section   TCC_STATE_VAR(dwarf_str_section)
+#define dwarf_line_str_section TCC_STATE_VAR(dwarf_line_str_section)
 #define gnu_ext             TCC_STATE_VAR(gnu_ext)
 #define tcc_error_noabort   TCC_SET_STATE(_tcc_error_noabort)
 #define tcc_error           TCC_SET_STATE(_tcc_error)
