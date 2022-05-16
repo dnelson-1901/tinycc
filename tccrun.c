@@ -180,10 +180,12 @@ LIBTCCAPI int tcc_run(TCCState *s1, int argc, char **argv)
 	if (s1->dwarf) {
 	    rc->dwarf_line = dwarf_line_section->data;
 	    rc->dwarf_line_end = dwarf_line_section->data + dwarf_line_section->data_offset;
-	    rc->dwarf_line_str = dwarf_line_str_section->data;
+	    if (dwarf_line_str_section)
+		rc->dwarf_line_str = dwarf_line_str_section->data;
             rc->dwarf_text = text_section->sh_addr;
 	}
-	else {
+	else
+	{
             rc->stab_sym = (Stab_Sym *)stab_section->data;
             rc->stab_sym_end = (Stab_Sym *)(stab_section->data + stab_section->data_offset);
             rc->stab_str = (char *)stab_section->link->data;
@@ -443,6 +445,21 @@ static int rt_printf(const char *fmt, ...)
     return r;
 }
 
+static char *rt_elfsym(rt_context *rc, addr_t wanted_pc, addr_t *func_addr)
+{
+    ElfW(Sym) *esym;
+    for (esym = rc->esym_start + 1; esym < rc->esym_end; ++esym) {
+        int type = ELFW(ST_TYPE)(esym->st_info);
+        if ((type == STT_FUNC || type == STT_GNU_IFUNC)
+            && wanted_pc >= esym->st_value
+            && wanted_pc < esym->st_value + esym->st_size) {
+            *func_addr = esym->st_value;
+            return rc->elf_str + esym->st_name;
+        }
+    }
+    return NULL;
+}
+
 #define INCLUDE_STACK_SIZE 32
 
 /* print the position in the source file of PC value 'pc' by reading
@@ -455,7 +472,6 @@ static addr_t rt_printline (rt_context *rc, addr_t wanted_pc,
     const char *incl_files[INCLUDE_STACK_SIZE];
     int incl_index, last_incl_index, len, last_line_num, i;
     const char *str, *p;
-    ElfW(Sym) *esym;
     Stab_Sym *sym;
 
 next:
@@ -545,24 +561,14 @@ next:
     func_name[0] = '\0';
     func_addr = 0;
     last_incl_index = 0;
-
     /* we try symtab symbols (no line number info) */
-    for (esym = rc->esym_start + 1; esym < rc->esym_end; ++esym) {
-        int type = ELFW(ST_TYPE)(esym->st_info);
-        if (type == STT_FUNC || type == STT_GNU_IFUNC) {
-            if (wanted_pc >= esym->st_value &&
-                wanted_pc < esym->st_value + esym->st_size) {
-                pstrcpy(func_name, sizeof(func_name),
-                    rc->elf_str + esym->st_name);
-                func_addr = esym->st_value;
-                goto found;
-            }
-        }
+    p = rt_elfsym(rc, wanted_pc, &func_addr);
+    if (p) {
+        pstrcpy(func_name, sizeof func_name, p);
+        goto found;
     }
-
     if ((rc = rc->next))
         goto next;
-
 found:
     i = last_incl_index;
     if (i > 0) {
@@ -588,12 +594,32 @@ found:
     return func_addr;
 }
 
+/* ------------------------------------------------------------- */
+/* rt_printline - dwarf version */
+
 #define MAX_128	((8 * sizeof (long long) + 6) / 7)
 
-#define	DW_GETC(s,e)	((s) < (e) ? *(s)++ : 0)
-
 #define DIR_TABLE_SIZE	(64)
-#define FILE_TABLE_SIZE	(256)
+#define FILE_TABLE_SIZE	(512)
+
+#define	dwarf_read_1(ln,end) \
+	((ln) < (end) ? *(ln)++ : 0)
+#define	dwarf_read_2(ln,end) \
+	((ln) + 2 < (end) ? (ln) += 2, read16le((ln) - 2) : 0)
+#define	dwarf_read_4(ln,end) \
+	((ln) + 4 < (end) ? (ln) += 4, read32le((ln) - 4) : 0)
+#define	dwarf_read_8(ln,end) \
+	((ln) + 8 < (end) ? (ln) += 8, read64le((ln) - 8) : 0)
+#define	dwarf_ignore_type(ln, end) /* timestamp/size/md5/... */ \
+	switch (entry_format[j].form) { \
+	case DW_FORM_data1: (ln) += 1; break; \
+	case DW_FORM_data2: (ln) += 2; break; \
+	case DW_FORM_data4: (ln) += 3; break; \
+	case DW_FORM_data8: (ln) += 8; break; \
+	case DW_FORM_data16: (ln) += 16; break; \
+	case DW_FORM_udata: dwarf_read_uleb128(&(ln), (end)); break; \
+	default: goto next_line; \
+	}
 
 static unsigned long long
 dwarf_read_uleb128(unsigned char **ln, unsigned char *end)
@@ -603,7 +629,7 @@ dwarf_read_uleb128(unsigned char **ln, unsigned char *end)
     int i;
 
     for (i = 0; i < MAX_128; i++) {
-	unsigned long long byte = DW_GETC(cp, end);
+	unsigned long long byte = dwarf_read_1(cp, end);
 
         retval |= (byte & 0x7f) << (i * 7);
 	if ((byte & 0x80) == 0)
@@ -621,7 +647,7 @@ dwarf_read_sleb128(unsigned char **ln, unsigned char *end)
     int i;
 
     for (i = 0; i < MAX_128; i++) {
-	unsigned long long byte = DW_GETC(cp, end);
+	unsigned long long byte = dwarf_read_1(cp, end);
 
         retval |= (byte & 0x7f) << (i * 7);
 	if ((byte & 0x80) == 0) {
@@ -633,34 +659,6 @@ dwarf_read_sleb128(unsigned char **ln, unsigned char *end)
     *ln = cp;
     return retval;
 }
-
-static unsigned int dwarf_read_32(unsigned char **ln, unsigned char *end)
-{
-    unsigned char *cp = *ln;
-    unsigned int retval = 0;
-
-    if ((cp + 4) < end) {
-	retval = read32le(cp);
-	cp += 4;
-    }
-    *ln = cp;
-    return retval;
-}
-
-#if PTR_SIZE == 8
-static unsigned long long dwarf_read_64(unsigned char **ln, unsigned char *end)
-{
-    unsigned char *cp = *ln;
-    unsigned long long retval = 0;
-
-    if ((cp + 8) < end) {
-	retval = read64le(cp);
-	cp += 8;
-    }
-    *ln = cp;
-    return retval;
-}
-#endif
 
 static addr_t rt_printline_dwarf (rt_context *rc, addr_t wanted_pc,
     const char *msg, const char *skip)
@@ -678,7 +676,13 @@ static addr_t rt_printline_dwarf (rt_context *rc, addr_t wanted_pc,
     unsigned int opindex;
     unsigned int col;
     unsigned int i;
+    unsigned int j;
     unsigned int len;
+    unsigned int value;
+    struct {
+	unsigned int type;
+	unsigned int form;
+    } entry_format[256];
     unsigned int dir_size;
 #if 0
     char *dirs[DIR_TABLE_SIZE];
@@ -691,116 +695,161 @@ static addr_t rt_printline_dwarf (rt_context *rc, addr_t wanted_pc,
     addr_t last_pc;
     addr_t pc;
     addr_t func_addr;
+    addr_t offset_dll;
     int line;
     char *filename;
     char *function;
-    ElfW(Sym) *esym;
 
 next:
+    offset_dll = 0;
     ln = rc->dwarf_line;
     while (ln < rc->dwarf_line_end) {
 	dir_size = 0;
 	filename_size = 0;
         last_pc = 0;
         pc = 0;
-        func_addr = -1;
+        func_addr = 0;
         line = 1;
         filename = NULL;
         function = NULL;
-	size = dwarf_read_32(&ln, rc->dwarf_line_end);
+	size = dwarf_read_4(ln, rc->dwarf_line_end);
 	end = ln + size;
-	version = DW_GETC(ln, end);
- 	version += DW_GETC(ln, end) << 8;
+	version = dwarf_read_2(ln, end);
 	if (version >= 5)
 	    ln += 6; // address size, segment selector, prologue Length
 	else
 	    ln += 4; // prologue Length
-	min_insn_length = DW_GETC(ln, end);
+	min_insn_length = dwarf_read_1(ln, end);
 	if (version >= 4)
-	    max_ops_per_insn = DW_GETC(ln, end);
+	    max_ops_per_insn = dwarf_read_1(ln, end);
 	else
 	    max_ops_per_insn = 1;
 	ln++; // Initial value of 'is_stmt'
-	line_base = DW_GETC(ln, end);
+	line_base = dwarf_read_1(ln, end);
 	line_base |= line_base >= 0x80 ? ~0xff : 0;
-	line_range = DW_GETC(ln, end);
-	opcode_base = DW_GETC(ln, end);
+	line_range = dwarf_read_1(ln, end);
+	opcode_base = dwarf_read_1(ln, end);
 	opindex = 0;
 	ln += 12;
 	if (version >= 5) {
-	    col = DW_GETC(ln, end);
-	    for (i = 0; i < col * 2; i++)
-	        dwarf_read_uleb128(&ln, end);
+	    col = dwarf_read_1(ln, end);
+	    for (i = 0; i < col; i++) {
+	        entry_format[i].type = dwarf_read_uleb128(&ln, end);
+	        entry_format[i].form = dwarf_read_uleb128(&ln, end);
+	    }
 	    dir_size = dwarf_read_uleb128(&ln, end);
-	    for (i = 0; i < dir_size; i++)
+	    for (i = 0; i < dir_size; i++) {
+		for (j = 0; j < col; j++) {
+		    if (entry_format[j].type == DW_LNCT_path) {
+		        if (entry_format[j].form != DW_FORM_line_strp)
+			    goto next_line;
 #if 0
-		if (i < DIR_TABLE_SIZE)
-		    dirs[i] = (char *)rc->dwarf_line_str + dwarf_read_32(&ln, end);
-		else
+		        value = dwarf_read_4(ln, end);
+		        if (i < DIR_TABLE_SIZE)
+		            dirs[i] = (char *)rc->dwarf_line_str + value;
+#else
+			dwarf_read_4(ln, end);
 #endif
-		    dwarf_read_32(&ln, end);
-	    col = DW_GETC(ln, end);
-	    for (i = 0; i < col * 2; i++)
-	        dwarf_read_uleb128(&ln, end);
+		    }
+		    else 
+			dwarf_ignore_type(ln, end);
+		}
+	    }
+	    col = dwarf_read_1(ln, end);
+	    for (i = 0; i < col; i++) {
+	        entry_format[i].type = dwarf_read_uleb128(&ln, end);
+	        entry_format[i].form = dwarf_read_uleb128(&ln, end);
+	    }
 	    filename_size = dwarf_read_uleb128(&ln, end);
 	    for (i = 0; i < filename_size; i++)
-		if (i < FILE_TABLE_SIZE) {
-		    filename_table[i].name = (char *)rc->dwarf_line_str + dwarf_read_32(&ln, end);
-		    filename_table[i].dir_entry = dwarf_read_uleb128(&ln, end);
-	        }
-		else {
-		    dwarf_read_32(&ln, end);
-		    dwarf_read_uleb128(&ln, end);
-		}
+		for (j = 0; j < col; j++) {
+		    if (entry_format[j].type == DW_LNCT_path) {
+			if (entry_format[j].form != DW_FORM_line_strp)
+			    goto next_line;
+			value = dwarf_read_4(ln, end);
+		        if (i < FILE_TABLE_SIZE)
+		            filename_table[i].name =
+				(char *)rc->dwarf_line_str + value;
+	            }
+		    else if (entry_format[j].type == DW_LNCT_directory_index) {
+			switch (entry_format[j].form) {
+			case DW_FORM_data1: value = dwarf_read_1(ln, end); break;
+			case DW_FORM_data2: value = dwarf_read_2(ln, end); break;
+			case DW_FORM_data4: value = dwarf_read_4(ln, end); break;
+			case DW_FORM_udata: value = dwarf_read_uleb128(&ln, end); break;
+			default: goto next_line;
+			}
+		        if (i < FILE_TABLE_SIZE)
+		            filename_table[i].dir_entry = value;
+		    }
+		    else 
+			dwarf_ignore_type(ln, end);
+	    }
 	}
 	else {
-	    while ((i = DW_GETC(ln, end))) {
+	    while ((dwarf_read_1(ln, end))) {
 #if 0
 		if (++dir_size < DIR_TABLE_SIZE)
 		    dirs[dir_size - 1] = (char *)ln - 1;
 #endif
-		while (DW_GETC(ln, end)) {}
+		while (dwarf_read_1(ln, end)) {}
 	    }
-	    while ((i = DW_GETC(ln, end))) {
+	    while ((dwarf_read_1(ln, end))) {
 		if (++filename_size < FILE_TABLE_SIZE) {
 		    filename_table[filename_size - 1].name = (char *)ln - 1;
-		    while (DW_GETC(ln, end)) {}
+		    while (dwarf_read_1(ln, end)) {}
 		    filename_table[filename_size - 1].dir_entry =
 		        dwarf_read_uleb128(&ln, end);
 		}
 		else {
-		    while (DW_GETC(ln, end)) {}
+		    while (dwarf_read_1(ln, end)) {}
 		    dwarf_read_uleb128(&ln, end);
 		}
 		dwarf_read_uleb128(&ln, end); // time
 		dwarf_read_uleb128(&ln, end); // size
 	    }
 	}
+	if (filename_size >= 1)
+	    filename = filename_table[0].name;
 	while (ln < end) {
 	    last_pc = pc;
-	    switch (DW_GETC(ln, end)) {
+	    switch (dwarf_read_1(ln, end)) {
 	    case 0:
 		len = dwarf_read_uleb128(&ln, end);
 		cp = ln;
 		ln += len;
 		if (len == 0)
 		    goto next_line;
-		switch (DW_GETC(cp, end)) {
+		switch (dwarf_read_1(cp, end)) {
 		case DW_LNE_end_sequence:
 		    goto next_line;
 		case DW_LNE_set_address:
 #if PTR_SIZE == 4
-		    dwarf_read_32(&cp, end);
+		    pc = dwarf_read_4(cp, end);
 #else
-		    dwarf_read_64(&cp, end);
+		    pc = dwarf_read_8(cp, end);
 #endif
-		    pc = rc->dwarf_text;
+		    if (rc->num_callers < 0) {
+			/* dll */
+			if (!offset_dll)
+			    offset_dll = pc;
+		        pc = rc->dwarf_text + (pc - offset_dll);
+		    }
 		    opindex = 0;
 		    break;
 		case DW_LNE_define_file: /* deprecated */
-		    break;
-		case DW_LNE_set_discriminator:
-		    dwarf_read_uleb128(&cp, end);
+		    if (++filename_size < FILE_TABLE_SIZE) {
+		        filename_table[filename_size - 1].name = (char *)ln - 1;
+		        while (dwarf_read_1(ln, end)) {}
+		        filename_table[filename_size - 1].dir_entry =
+		            dwarf_read_uleb128(&ln, end);
+		    }
+		    else {
+		        while (dwarf_read_1(ln, end)) {}
+		        dwarf_read_uleb128(&ln, end);
+		    }
+		    dwarf_read_uleb128(&ln, end); // time
+		    dwarf_read_uleb128(&ln, end); // size
 		    break;
 		case DW_LNE_hi_user - 1:
 		    function = (char *)cp;
@@ -852,8 +901,7 @@ next:
 		i = 0;
 		goto check_pc;
 	    case DW_LNS_fixed_advance_pc:
-		i = DW_GETC(ln, end);
-		i += DW_GETC(ln, end) << 8;
+		i = dwarf_read_2(ln, end);
 		pc += i;
 		opindex = 0;
 		i = 0;
@@ -888,25 +936,13 @@ next_line:
     }
 
     filename = NULL;
-    function = NULL;
-    func_addr = -1;
-
+    func_addr = 0;
     /* we try symtab symbols (no line number info) */
-    for (esym = rc->esym_start + 1; esym < rc->esym_end; ++esym) {
-        int type = ELFW(ST_TYPE)(esym->st_info);
-        if (type == STT_FUNC || type == STT_GNU_IFUNC) {
-            if (wanted_pc >= esym->st_value &&
-                wanted_pc < esym->st_value + esym->st_size) {
-                function = rc->elf_str + esym->st_name;
-                func_addr = esym->st_value;
-                goto found;
-            }
-        }
-    }
-
+    function = rt_elfsym(rc, wanted_pc, &func_addr);
+    if (function)
+        goto found;
     if ((rc = rc->next))
         goto next;
-
 found:
     if (filename) {
 	if (skip[0] && strstr(filename, skip))
@@ -918,6 +954,7 @@ found:
     rt_printf("%s %s", msg, function ? function : "???");
     return (addr_t)func_addr;
 }
+/* ------------------------------------------------------------- */
 
 static int rt_get_caller_pc(addr_t *paddr, rt_context *rc, int level);
 

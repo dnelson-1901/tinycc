@@ -349,9 +349,10 @@ ST_INLN char *unicode_to_utf8 (char *b, uint32_t Uc)
 {
     if (Uc<0x80) *b++=Uc;
     else if (Uc<0x800) *b++=192+Uc/64, *b++=128+Uc%64;
-    else if (Uc-0xd800u<0x800) return b;
+    else if (Uc-0xd800u<0x800) goto error;
     else if (Uc<0x10000) *b++=224+Uc/4096, *b++=128+Uc/64%64, *b++=128+Uc%64;
     else if (Uc<0x110000) *b++=240+Uc/262144, *b++=128+Uc/4096%64, *b++=128+Uc/64%64, *b++=128+Uc%64;
+    else error: tcc_error("0x%x is not a valid universal character", Uc);
     return b;
 }
 
@@ -2038,10 +2039,14 @@ include_done:
             if (tok == TOK_STR) {
                 if (file->true_filename == file->filename)
                     file->true_filename = tcc_strdup(file->filename);
-                /* prepend directory from real file */
-                pstrcpy(buf, sizeof buf, file->true_filename);
-                *tcc_basename(buf) = 0;
-                pstrcat(buf, sizeof buf, (char *)tokc.str.data);
+                q = (char *)tokc.str.data;
+                buf[0] = 0;
+                if (!IS_ABSPATH(q)) {
+                    /* prepend directory from real file */
+                    pstrcpy(buf, sizeof buf, file->true_filename);
+                    *tcc_basename(buf) = 0;
+                }
+                pstrcat(buf, sizeof buf, q);
                 tcc_debug_putfile(s1, buf);
             } else if (parse_flags & PARSE_FLAG_ASM_FILE)
                 break;
@@ -3765,8 +3770,6 @@ static void tcc_predefs(TCCState *s1, CString *cs, int is_asm)
       putdef(cs, "__CHAR_UNSIGNED__");
     if (s1->optimize > 0)
       putdef(cs, "__OPTIMIZE__");
-    if (s1->optimize == 's')
-          putdef(cs, "__OPTIMIZE_SIZE__");
     if (s1->option_pthread)
       putdef(cs, "_REENTRANT");
     if (s1->leading_underscore)
