@@ -2582,8 +2582,10 @@ static const char* type_to_strbuf(CType* t)
 {
     static char buf[4][256];
     static int bufnum = 0;
+	char *rv;
+
     type_to_str(buf[bufnum], sizeof(buf[bufnum]), t, NULL);
-    char *rv = buf[bufnum];
+    rv = buf[bufnum];
     bufnum = (bufnum + 1) & 3;
     return rv;
 }
