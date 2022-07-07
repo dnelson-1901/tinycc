@@ -5401,9 +5401,12 @@ ST_FUNC void unary(void)
 	       outside, so any reactivation of code emission (from labels
 	       or loop heads) can be disabled again after the end of it. */
             block(1);
-            /* or'ing to keep however possible CODE_OFF() from e.g. "return 0;"
-               in the statement expression */
-	    nocode_wanted |= saved_nocode_wanted;
+            /* If the statement expr can be entered, then we retain the current
+               nocode_wanted state (from e.g. a 'return 0;' in the stmt-expr).
+               If it can't be entered then the state is that from before the
+               statement expression.  */
+            if (saved_nocode_wanted)
+              nocode_wanted = saved_nocode_wanted;
             skip(')');
         } else {
             gexpr();
@@ -7665,6 +7668,10 @@ static void decl_initializer(init_params *p, CType *type, unsigned long c, int f
             }
 
 	    len = 0;
+            /* GNU extension: if the initializer is empty for a flex array,
+               it's size is zero.  We won't enter the loop, so set the size
+               now.  */
+            decl_design_flex(p, s, len);
 	    while (tok != '}' || (flags & DIF_HAVE_ELEM)) {
 		len = decl_designator(p, type, c, &f, flags, len);
 		flags &= ~DIF_HAVE_ELEM;
