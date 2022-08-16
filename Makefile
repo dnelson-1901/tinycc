@@ -93,7 +93,10 @@ NATIVE_DEFINES_$(CONFIG_arm_vfp) += -DTCC_ARM_VFP
 NATIVE_DEFINES_$(CONFIG_arm64) += -DTCC_TARGET_ARM64
 NATIVE_DEFINES_$(CONFIG_riscv64) += -DTCC_TARGET_RISCV64
 NATIVE_DEFINES_$(CONFIG_BSD) += -DTARGETOS_$(TARGETOS)
+NATIVE_DEFINES_$(CONFIG_Android) += -DTARGETOS_ANDROID
 NATIVE_DEFINES_$(CONFIG_pie) += -DCONFIG_TCC_PIE
+NATIVE_DEFINES_$(CONFIG_pic) += -DCONFIG_TCC_PIC
+NATIVE_DEFINES_$(CONFIG_new-dtags) += -DCONFIG_NEW_DTAGS
 NATIVE_DEFINES_no_$(CONFIG_bcheck) += -DCONFIG_TCC_BCHECK=0
 NATIVE_DEFINES_no_$(CONFIG_backtrace) += -DCONFIG_TCC_BACKTRACE=0
 NATIVE_DEFINES += $(NATIVE_DEFINES_yes) $(NATIVE_DEFINES_no_no)
@@ -175,10 +178,10 @@ DEFINES += $(DEF-$(or $(findstring win,$T),unx))
 
 ifneq ($(X),)
 ifeq ($(CONFIG_WIN32),yes)
-DEF-win += -DTCC_LIBTCC1="\"$(X)libtcc1.a\""
-DEF-unx += -DTCC_LIBTCC1="\"lib/$(X)libtcc1.a\""
+DEF-win += -DCONFIG_TCC_CROSSPREFIX="\"$X\""
+DEF-unx += -DCONFIG_TCC_CROSSPREFIX="\"lib/$X\""
 else
-DEF-all += -DTCC_LIBTCC1="\"$(X)libtcc1.a\""
+DEF-all += -DCONFIG_TCC_CROSSPREFIX="\"$X\""
 DEF-win += -DCONFIG_TCCDIR="\"$(tccdir)/win32\""
 endif
 endif
@@ -278,7 +281,7 @@ libtcc.a: $(LIBTCC_OBJ)
 
 # dynamic libtcc library
 libtcc.so: $(LIBTCC_OBJ)
-	$S$(CC) -shared -Wl,-soname,$@ -o $@ $^ $(LDFLAGS)
+	$S$(CC) -shared -Wl,-soname,$@ -o $@ $^ $(LIBS) $(LDFLAGS)
 
 libtcc.so: CFLAGS+=-fPIC
 libtcc.so: LDFLAGS+=-fPIC

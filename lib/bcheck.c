@@ -161,7 +161,7 @@ static pthread_spinlock_t bounds_spin;
 #define HAVE_TLS_FUNC          (1)
 #define HAVE_TLS_VAR           (0)
 #endif
-#ifdef TCC_MUSL
+#if defined TCC_MUSL || defined __ANDROID__
 # undef HAVE_CTYPE
 #endif
 #endif
@@ -257,6 +257,8 @@ void splay_printtree(Tree * t, int d);
 
 /* external interface */
 void __bounds_checking (int no_check);
+void __bound_checking_lock (void);
+void __bound_checking_unlock (void);
 void __bound_never_fatal (int no_check);
 DLL_EXPORT void * __bound_ptr_add(void *p, size_t offset);
 DLL_EXPORT void * __bound_ptr_indir1(void *p, size_t offset);
@@ -443,7 +445,11 @@ int tcc_backtrace(const char *fmt, ...);
 
 /* print a bound error message */
 #define bound_warning(...) \
-    tcc_backtrace("^bcheck.c^BCHECK: " __VA_ARGS__)
+    do {                                                 \
+        WAIT_SEM ();                                     \
+        tcc_backtrace("^bcheck.c^BCHECK: " __VA_ARGS__); \
+        POST_SEM ();                                     \
+    } while (0)
 
 #define bound_error(...)            \
     do {                            \
@@ -494,6 +500,16 @@ void __bounds_checking (int no_check)
 #else
     fetch_and_add (&no_checking, no_check);
 #endif
+}
+
+void __bound_checking_lock(void)
+{
+    WAIT_SEM ();
+}
+
+void __bound_checking_unlock(void)
+{
+    POST_SEM ();
 }
 
 /* enable/disable checking. This can be used in signal handlers. */
@@ -1158,7 +1174,8 @@ void __attribute__((destructor)) __bound_exit(void)
 
     if (inited) {
 #if !defined(_WIN32) && !defined(__APPLE__) && !defined TCC_MUSL && \
-    !defined(__OpenBSD__) && !defined(__FreeBSD__) && !defined(__NetBSD__)
+    !defined(__OpenBSD__) && !defined(__FreeBSD__) && !defined(__NetBSD__) && \
+    !defined(__ANDROID__)
         if (print_heap) {
             extern void __libc_freeres (void);
             __libc_freeres ();
@@ -1261,6 +1278,7 @@ void __bound_exit_dll(size_t *p)
     dprintf(stderr, "%s, %s()\n", __FILE__, __FUNCTION__);
 
     if (p) {
+        WAIT_SEM ();
 	while (p[0] != 0) {
 	    tree = splay_delete(p[0], tree);
 #if BOUND_DEBUG
@@ -1272,6 +1290,7 @@ void __bound_exit_dll(size_t *p)
 #endif
 	    p += 2;
 	}
+        POST_SEM ();
     }
 }
 

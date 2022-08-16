@@ -147,7 +147,7 @@ static const char help2[] =
     "  -soname=                      set DT_SONAME elf tag\n"
     "  -Bsymbolic                    set DT_SYMBOLIC elf tag\n"
     "  -oformat=[elf32/64-* binary]  set executable output format\n"
-    "  -init= -fini= -as-needed -O   (ignored)\n"
+    "  -init= -fini= -Map= -as-needed -O   (ignored)\n"
     "Predefined macros:\n"
     "  tcc -E -dM - < /dev/null\n"
 #endif
@@ -284,6 +284,9 @@ int main(int argc0, char **argv0)
 redo:
     argc = argc0, argv = argv0;
     s = s1 = tcc_new();
+#ifdef CONFIG_TCC_SWITCHES
+    tcc_set_options(s, CONFIG_TCC_SWITCHES);
+#endif
     opt = tcc_parse_args(s, &argc, &argv, 1);
 
     if (n == 0) {

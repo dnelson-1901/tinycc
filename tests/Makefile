@@ -36,8 +36,8 @@ endif
 ifeq (,$(filter arm64 i386 x86_64,$(ARCH)))
  TESTS := $(filter-out vla_test-run,$(TESTS))
 endif
-ifeq ($(CONFIG_arm_eabi),yes)
- TESTS := $(filter-out test3,$(TESTS))
+ifeq (-$(CONFIG_arm_eabi)-$(CONFIG_arm_vfp)-,-yes--)
+ TESTS := $(filter-out test3 test1b,$(TESTS))
 endif
 ifeq (,$(filter i386 x86_64,$(ARCH)))
  TESTS := $(filter-out asm-c-connect-test,$(TESTS))
@@ -221,7 +221,7 @@ ex%: $(TOPSRC)/examples/ex%.c
 
 # tiny assembler testing
 asmtest.ref: asmtest.S
-	$(CC) -Wa,-W -o asmtest.ref.o -c asmtest.S
+	$(CC) -Wa,-W -Wa,-mx86-used-note=no -o asmtest.ref.o -c asmtest.S
 	objdump -D asmtest.ref.o > asmtest.ref
 
 ifeq ($(ARCH),arm)
@@ -251,7 +251,7 @@ abitest-% : abitest-%.exe
 	./$< $(TCCFLAGS)
 
 abitest: abitest-cc
-ifneq ($(CONFIG_arm_eabi),yes) # not ARM soft-float
+ifneq (-$(CONFIG_arm_eabi)-$(CONFIG_arm_vfp)-,-yes--)
 abitest: abitest-tcc
 endif
 
@@ -261,6 +261,8 @@ vla_test$(EXESUF): vla_test.c
 vla_test-run: vla_test$(EXESUF)
 	@echo ------------ $@ ------------
 	./vla_test$(EXESUF)
+
+.PHONY: abitest vla_test
 
 asm-c-connect$(EXESUF): asm-c-connect-1.c asm-c-connect-2.c
 	$(TCC) -o $@ $^

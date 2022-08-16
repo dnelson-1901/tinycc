@@ -1071,12 +1071,18 @@ static int pe_section_class(Section *s)
 {
     int type, flags;
     const char *name;
-
     type = s->sh_type;
     flags = s->sh_flags;
     name = s->name;
+    if (0 == memcmp(name, ".stab", 5)) {
+        if (0 == s->s1->do_debug)
+            return sec_last;
+        return name[5] ? sec_stabstr : sec_stab;
+    }
     if (flags & SHF_ALLOC) {
-        if (type == SHT_PROGBITS) {
+        if (type == SHT_PROGBITS
+         || type == SHT_INIT_ARRAY
+         || type == SHT_FINI_ARRAY) {
             if (flags & SHF_EXECINSTR)
                 return sec_text;
             if (flags & SHF_WRITE)
@@ -1089,52 +1095,44 @@ static int pe_section_class(Section *s)
                 return sec_pdata;
             return sec_rdata;
         } else if (type == SHT_NOBITS) {
-            if (flags & SHF_WRITE)
-                return sec_bss;
+            return sec_bss;
         }
+        return sec_other;
     } else {
         if (0 == strcmp(name, ".reloc"))
             return sec_reloc;
     }
-    if (0 == memcmp(name, ".stab", 5))
-        return name[5] ? sec_stabstr : sec_stab;
-    if (flags & SHF_ALLOC)
-        return sec_other;
-    return -1;
+    return sec_last;
 }
 
 static int pe_assign_addresses (struct pe_info *pe)
 {
-    int i, k, o, c;
+    int i, k, n, c, nbs;
     DWORD addr;
-    int *section_order;
+    int *sec_order, *sec_cls;
     struct section_info *si;
     Section *s;
     TCCState *s1 = pe->s1;
 
     if (PE_DLL == pe->type)
         pe->reloc = new_section(pe->s1, ".reloc", SHT_PROGBITS, 0);
-    // pe->thunk = new_section(pe->s1, ".iedat", SHT_PROGBITS, SHF_ALLOC);
+    //pe->thunk = new_section(pe->s1, ".iedat", SHT_PROGBITS, SHF_ALLOC);
 
-    section_order = tcc_malloc(pe->s1->nb_sections * sizeof (int));
-    for (o = k = 0 ; k < sec_last; ++k) {
-        for (i = 1; i < s1->nb_sections; ++i) {
-            s = s1->sections[i];
-            if (k == pe_section_class(s))
-                section_order[o++] = i;
-        }
+    nbs = s1->nb_sections;
+    sec_order = tcc_mallocz(2 * sizeof (int) * nbs);
+    sec_cls = sec_order + nbs;
+    for (i = 1; i < nbs; ++i) {
+        s = s1->sections[i];
+        k = pe_section_class(s);
+        for (n = i; n > 1 && k < (c = sec_cls[n - 1]); --n)
+            sec_cls[n] = c, sec_order[n] = sec_order[n - 1];
+        sec_cls[n] = k, sec_order[n] = i;
     }
-
     si = NULL;
     addr = pe->imagebase + 1;
 
-    for (i = 0; i < o; ++i) {
-        k = section_order[i];
-        s = s1->sections[k];
-        c = pe_section_class(s);
-
-        if ((c == sec_stab || c == sec_stabstr) && 0 == s1->do_debug)
-            continue;
+    for (i = 1; (c = sec_cls[i]) < sec_last; ++i) {
+        s = s1->sections[sec_order[i]];
 
         if (PE_MERGE_DATA && c == sec_bss)
             c = sec_data;
@@ -1195,28 +1193,31 @@ add_section:
         }
         //printf("%08x %05x %08x %s\n", si->sh_addr, si->sh_size, si->pe_flags, s->name);
     }
-    tcc_free(section_order);
 #if 0
-    for (i = 1; i < s1->nb_sections; ++i) {
-        Section *s = s1->sections[i];
+    for (i = 1; i < nbs; ++i) {
+        Section *s = s1->sections[sec_order[i]];
         int type = s->sh_type;
         int flags = s->sh_flags;
         printf("section %-16s %-10s %08x %04x %s,%s,%s\n",
             s->name,
             type == SHT_PROGBITS ? "progbits" :
+            type == SHT_INIT_ARRAY ? "initarr" :
+            type == SHT_FINI_ARRAY ? "finiarr" :
             type == SHT_NOBITS ? "nobits" :
             type == SHT_SYMTAB ? "symtab" :
             type == SHT_STRTAB ? "strtab" :
             type == SHT_RELX ? "rel" : "???",
-            s->sh_addr,
-            s->data_offset,
+            (unsigned)s->sh_addr,
+            (unsigned)s->data_offset,
             flags & SHF_ALLOC ? "alloc" : "",
             flags & SHF_WRITE ? "write" : "",
             flags & SHF_EXECINSTR ? "exec" : ""
             );
+        fflush(stdout);
     }
     s1->verbose = 2;
 #endif
+    tcc_free(sec_order);
     return 0;
 }
 
@@ -1533,16 +1534,6 @@ ST_FUNC int pe_putimport(TCCState *s1, int dllindex, const char *name, addr_t va
         );
 }
 
-static int pe_add_dllref(TCCState *s1, const char *dllname)
-{
-    int i;
-    for (i = 0; i < s1->nb_loaded_dlls; ++i)
-        if (0 == strcmp(s1->loaded_dlls[i]->name, dllname))
-            return i + 1;
-    tcc_add_dllref(s1, dllname);
-    return s1->nb_loaded_dlls;
-}
-
 static int read_mem(int fd, unsigned offset, void *buffer, unsigned len)
 {
     lseek(fd, offset, SEEK_SET);
@@ -1732,7 +1723,7 @@ static int pe_load_def(TCCState *s1, int fd)
             ++state;
             break;
         case 2:
-            dllindex = pe_add_dllref(s1, dllname);
+            dllindex = tcc_add_dllref(s1, dllname, 0)->index;
             ++state;
             /* fall through */
         default:
@@ -1769,7 +1760,7 @@ static int pe_load_dll(TCCState *s1, int fd, const char *filename)
     if (ret) {
         return -1;
     } else if (p) {
-        index = pe_add_dllref(s1, filename);
+        index = tcc_add_dllref(s1, filename, 0)->index;
         for (q = p; *q; q += 1 + strlen(q))
             pe_putimport(s1, index, q, 0);
         tcc_free(p);
@@ -1867,12 +1858,6 @@ ST_FUNC void pe_add_unwind_data(unsigned start, unsigned end, unsigned stack)
 #else
 #define PE_STDSYM(n,s) "_" n s
 #endif
-
-static void tcc_add_support(TCCState *s1, const char *filename)
-{
-    if (tcc_add_dll(s1, filename, 0) < 0)
-        tcc_error_noabort("%s not found", filename);
-}
 
 static void pe_add_runtime(TCCState *s1, struct pe_info *pe)
 {

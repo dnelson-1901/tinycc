@@ -203,8 +203,7 @@ extern long double strtold (const char *__nptr, char **__endptr);
 # endif
 #endif
 
-#if !defined TCC_IS_NATIVE \
-    || (defined CONFIG_TCC_BACKTRACE && CONFIG_TCC_BACKTRACE==0)
+#if defined CONFIG_TCC_BACKTRACE && CONFIG_TCC_BACKTRACE==0
 # undef CONFIG_TCC_BACKTRACE
 #else
 # define CONFIG_TCC_BACKTRACE 1 /* enable builtin stack backtraces */
@@ -235,6 +234,10 @@ extern long double strtold (const char *__nptr, char **__endptr);
     || (defined TCC_TARGET_MACHO && defined TCC_TARGET_ARM64) \
     || (defined _WIN32 && !defined __GNUC__)
 # define TCC_USING_DOUBLE_FOR_LDOUBLE 1
+#endif
+
+#ifdef CONFIG_TCC_PIE
+# define CONFIG_TCC_PIC 1
 #endif
 
 /* ------------ path configuration ------------ */
@@ -285,7 +288,8 @@ extern long double strtold (const char *__nptr, char **__endptr);
 #  define CONFIG_TCC_LIBPATHS "{B}/lib"
 # else
 #  define CONFIG_TCC_LIBPATHS \
-        ALSO_TRIPLET(CONFIG_SYSROOT "/usr/" CONFIG_LDDIR) \
+        "{B}" \
+    ":" ALSO_TRIPLET(CONFIG_SYSROOT "/usr/" CONFIG_LDDIR) \
     ":" ALSO_TRIPLET(CONFIG_SYSROOT "/" CONFIG_LDDIR) \
     ":" ALSO_TRIPLET(CONFIG_SYSROOT "/usr/local/" CONFIG_LDDIR)
 # endif
@@ -609,6 +613,7 @@ typedef struct Section {
 typedef struct DLLReference {
     int level;
     void *handle;
+    unsigned char found, index;
     char name[1];
 } DLLReference;
 
@@ -722,7 +727,7 @@ typedef struct ExprValue {
 
 #define MAX_ASM_OPERANDS 30
 typedef struct ASMOperand {
-    int id; /* GCC 3 optional identifier (0 if number only supported */
+    int id; /* GCC 3 optional identifier (0 if number only supported) */
     char *constraint;
     char asm_str[16]; /* computed asm string for operand */
     SValue *vt; /* C value of the expression */
@@ -733,6 +738,7 @@ typedef struct ASMOperand {
     int is_llong; /* true if double register value */
     int is_memory; /* true if memory operand */
     int is_rw;     /* for '+' modifier */
+    int is_label;  /* for asm goto */
 } ASMOperand;
 #endif
 
@@ -823,6 +829,7 @@ struct TCCState {
     char *elf_entryname; /* "_start" unless set */
     char *init_symbol; /* symbols to call at load-time (not used currently) */
     char *fini_symbol; /* symbols to call at unload-time (not used currently) */
+    char *mapfile; /* create a mapfile (not used currently) */
 
     /* output type, see TCC_OUTPUT_XXX */
     int output_type;
@@ -1024,6 +1031,8 @@ struct filespec {
 #define VT_SYM       0x0200  /* a symbol value is added */
 #define VT_MUSTCAST  0x0C00  /* value must be casted to be correct (used for
                                 char/short stored in integer registers) */
+#define VT_NONCONST  0x1000  /* VT_CONST, but not an (C standard) integer
+                                constant expression */
 #define VT_MUSTBOUND 0x4000  /* bound checking must be done before
                                 dereferencing value */
 #define VT_BOUNDED   0x8000  /* value is bounded. The address of the
@@ -1265,9 +1274,8 @@ ST_FUNC int tcc_add_file_internal(TCCState *s1, const char *filename, int flags)
 #ifndef ELF_OBJ_ONLY
 ST_FUNC int tcc_add_crt(TCCState *s, const char *filename);
 #endif
-#ifndef TCC_TARGET_MACHO
 ST_FUNC int tcc_add_dll(TCCState *s, const char *filename, int flags);
-#endif
+ST_FUNC void tcc_add_support(TCCState *s1, const char *filename);
 #ifdef CONFIG_TCC_BCHECK
 ST_FUNC void tcc_add_bcheck(TCCState *s1);
 #endif
@@ -1281,7 +1289,7 @@ PUB_FUNC int tcc_parse_args(TCCState *s, int *argc, char ***argv, int optind);
 #ifdef _WIN32
 ST_FUNC char *normalize_slashes(char *path);
 #endif
-ST_FUNC DLLReference *tcc_add_dllref(TCCState *s1, const char *dllname);
+ST_FUNC DLLReference *tcc_add_dllref(TCCState *s1, const char *dllname, int level);
 ST_FUNC char *tcc_load_text(int fd);
 
 /* tcc_parse_args return codes: */
@@ -1487,6 +1495,7 @@ ST_DATA int func_bound_add_epilog;
 #define TCC_OUTPUT_FORMAT_ELF    0 /* default output format: ELF */
 #define TCC_OUTPUT_FORMAT_BINARY 1 /* binary image output */
 #define TCC_OUTPUT_FORMAT_COFF   2 /* COFF */
+#define TCC_OUTPUT_DYN           TCC_OUTPUT_DLL
 
 #define ARMAG  "!<arch>\012"    /* For COFF and a.out archives */
 
@@ -1568,7 +1577,7 @@ enum gotplt_entry {
 #if !defined TCC_TARGET_MACHO || defined TCC_IS_NATIVE
 ST_FUNC unsigned create_plt_entry(TCCState *s1, unsigned got_offset, struct sym_attr *attr);
 ST_FUNC void relocate_plt(TCCState *s1);
-ST_FUNC void build_got_entries(TCCState *s1); /* in tccelf.c */
+ST_FUNC void build_got_entries(TCCState *s1, int got_sym); /* in tccelf.c */
 #define NEED_BUILD_GOT
 
 #endif
@@ -1691,7 +1700,6 @@ ST_FUNC void gen_increment_tcov (SValue *sv);
 #endif
 
 /* ------------ tcccoff.c ------------ */
-
 #ifdef TCC_TARGET_COFF
 ST_FUNC int tcc_output_coff(TCCState *s1, FILE *f);
 ST_FUNC int tcc_load_coff(TCCState * s1, int fd);
