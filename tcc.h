@@ -77,7 +77,6 @@ extern long double strtold (const char *__nptr, char **__endptr);
 #  define LIBTCCAPI __declspec(dllexport)
 #  define PUB_FUNC LIBTCCAPI
 # endif
-# define inp next_inp /* inp is an intrinsic on msvc/mingw */
 # ifdef _MSC_VER
 #  pragma warning (disable : 4244)  // conversion from 'uint64_t' to 'int', possible loss of data
 #  pragma warning (disable : 4267)  // conversion from 'size_t' to 'int', possible loss of data
@@ -354,6 +353,10 @@ extern long double strtold (const char *__nptr, char **__endptr);
 /* (target specific) libtcc1.a */
 #ifndef TCC_LIBTCC1
 # define TCC_LIBTCC1 "libtcc1.a"
+#endif
+
+#ifndef CONFIG_TCC_CROSSPREFIX
+# define CONFIG_TCC_CROSSPREFIX ""
 #endif
 
 /* library to use with CONFIG_USE_LIBGCC instead of libtcc1.a */
@@ -1305,7 +1308,7 @@ ST_FUNC char *tcc_load_text(int fd);
 /* ------------ tccpp.c ------------ */
 
 ST_DATA struct BufferedFile *file;
-ST_DATA int ch, tok;
+ST_DATA int tok;
 ST_DATA CValue tokc;
 ST_DATA const int *macro_ptr;
 ST_DATA int parse_flags;
@@ -1818,8 +1821,16 @@ ST_FUNC void tcc_tcov_reset_ind(TCCState *s1);
 #define dwarf_str_section       s1->dwarf_str_section
 #define dwarf_line_str_section  s1->dwarf_line_str_section
 
+/* default dwarf version for "-g". use 0 to emit stab debug infos */
 #ifndef DWARF_VERSION
 # define DWARF_VERSION 0
+#endif
+
+/* default dwarf version for "-gdwarf" */
+#ifdef TCC_TARGET_MACHO
+# define DEFAULT_DWARF_VERSION 2
+#else
+# define DEFAULT_DWARF_VERSION 5
 #endif
 
 #if defined TCC_TARGET_PE

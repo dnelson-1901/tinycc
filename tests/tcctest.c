@@ -2979,6 +2979,7 @@ void c99_vla_test_2(int d, int h, int w)
     int x, y, z;
     int (*arr)[h][w] = malloc(sizeof(int) * d*h*w);
     int c = 1;
+    static int (*starr)[h][w];
 
     printf("Test C99 VLA 6 (pointer)\n");
 
@@ -2998,13 +2999,15 @@ void c99_vla_test_2(int d, int h, int w)
         }
         puts("");
     }
+    starr = &arr[1];
     printf(" sizes : %d %d %d\n"
            " pdiff : %d %d\n"
-           " tests : %d %d\n",
+           " tests : %d %d %d\n",
         sizeof (*arr), sizeof (*arr)[0], sizeof (*arr)[0][0],
         arr + 2 - arr, *arr + 3 - *arr,
         0 == sizeof (*arr + 1) - sizeof arr,
-        0 == sizeof sizeof *arr - sizeof arr
+        0 == sizeof sizeof *arr - sizeof arr,
+        starr[0][2][3] == arr[1][2][3]
         );
     free (arr);
 }
@@ -3029,9 +3032,9 @@ void c99_vla_test_3d(int s, int arr[2][3][s])
     printf ("%d\n", arr[1][2][3]);
 }
 
-void c99_vla_test_3e(int s, int arr[][3][s])
+void c99_vla_test_3e(int s, int arr[][3][--s])
 {
-    printf ("%d\n", arr[1][2][3]);
+    printf ("%d %d\n", s, arr[1][2][3]);
 }
 
 void c99_vla_test_3(void)
@@ -3039,12 +3042,12 @@ void c99_vla_test_3(void)
     int a[2][3][4];
 
     memset (a, 0, sizeof(a));
-    a[1][2][3] = 2;
+    a[1][2][3] = 123;
     c99_vla_test_3a(a);
     c99_vla_test_3b(2, a);
     c99_vla_test_3c(3, a);
     c99_vla_test_3d(4, a);
-    c99_vla_test_3e(4, a);
+    c99_vla_test_3e(5, a);
 }
 
 void c99_vla_test(void)
@@ -4315,6 +4318,12 @@ ntf("min=%d\n", 4);
 #line 2222 "test"
     printf("__LINE__=%d __FILE__=%s\n", __LINE__, __FILE__);
 #endif
+
+    printf("\\
+"12\\
+063\\
+n 456\"\n");
+
 }
 
 #define RUN(test) puts("---- " #test " ----"), test(), puts("")
