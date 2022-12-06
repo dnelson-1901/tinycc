@@ -96,6 +96,8 @@ NATIVE_DEFINES_$(CONFIG_BSD) += -DTARGETOS_$(TARGETOS)
 NATIVE_DEFINES_$(CONFIG_Android) += -DTARGETOS_ANDROID
 NATIVE_DEFINES_$(CONFIG_pie) += -DCONFIG_TCC_PIE
 NATIVE_DEFINES_$(CONFIG_pic) += -DCONFIG_TCC_PIC
+NATIVE_DEFINES_no_$(CONFIG_new_macho) += -DCONFIG_NEW_MACHO=0
+NATIVE_DEFINES_$(CONFIG_codesign) += -DCONFIG_CODESIGN
 NATIVE_DEFINES_$(CONFIG_new-dtags) += -DCONFIG_NEW_DTAGS
 NATIVE_DEFINES_no_$(CONFIG_bcheck) += -DCONFIG_TCC_BCHECK=0
 NATIVE_DEFINES_no_$(CONFIG_backtrace) += -DCONFIG_TCC_BACKTRACE=0
@@ -242,9 +244,12 @@ $(TCC_FILES) : DEFINES += -DONE_SOURCE=0
 $(X)tccpp.o : $(TCCDEFS_H)
 endif
 
-GITHASH := $(shell git rev-parse >/dev/null 2>&1 && git rev-parse --short HEAD || echo no)
-ifneq ($(GITHASH),no)
-DEF_GITHASH := -DTCC_GITHASH="\"$(shell git rev-parse --abbrev-ref HEAD):$(GITHASH)$(shell git diff --quiet || echo '-mod')\""
+FROM_GIT := $(shell git rev-parse >/dev/null 2>&1 && echo yes || echo no)
+
+ifeq ($(FROM_GIT),yes)
+GITHASH:=$(shell git rev-parse --abbrev-ref HEAD):$(shell git rev-parse --short HEAD) $(shell git log -1 --pretty='format:%cI')
+GITLOCAL:=$(shell git diff --quiet || echo ' locally modified')
+DEF_GITHASH:= -DTCC_GITHASH="\"$(GITHASH)$(GITLOCAL)\""
 endif
 
 ifeq ($(CONFIG_debug),yes)
@@ -266,7 +271,7 @@ $(X)%.o : %.c $(LIBTCC_INC)
 
 # additional dependencies
 $(X)tcc.o : tcctools.c
-$(X)tcc.o : DEFINES += $(DEF_GITHASH)
+$(X)tcc.o : DEFINES += $(DEF_GITHASH) $(DEF_GITDATE)
 
 # Host Tiny C Compiler
 tcc$(EXESUF): tcc.o $(LIBTCC)

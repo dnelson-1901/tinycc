@@ -420,7 +420,7 @@ ST_FUNC int cstr_vprintf(CString *cstr, const char *fmt, va_list ap)
         va_copy(v, ap);
         len = vsnprintf((char*)cstr->data + cstr->size, size, fmt, v);
         va_end(v);
-        if (len > 0 && len < size)
+        if (len >= 0 && len < size)
             break;
         size *= 2;
     }
@@ -3369,6 +3369,8 @@ static int macro_subst_tok(
                     for (i = 0; i < ws_str.len; i++)
                         tok_str_add(tok_str, ws_str.str[i]);
                 }
+		if (ws_str.len && ws_str.str[ws_str.len - 1] == '\n')
+		    tok_flags |= TOK_FLAG_BOL;
                 tok_str_free_str(ws_str.str);
                 return 0;
             } else {

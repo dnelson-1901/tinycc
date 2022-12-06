@@ -65,12 +65,11 @@ extern long double strtold (const char *__nptr, char **__endptr);
 # ifndef __GNUC__
 #  define strtold (long double)strtod
 #  define strtof (float)strtod
-#  ifdef _WIN64
+#  ifndef strtoll
 #   define strtoll _strtoi64
+#  endif
+#  ifndef strtoull
 #   define strtoull _strtoui64
-#  else
-#   define strtoll strtol
-#   define strtoull strtoul
 #  endif
 # endif
 # ifdef LIBTCC_AS_DLL
@@ -212,6 +211,12 @@ extern long double strtold (const char *__nptr, char **__endptr);
 #  undef CONFIG_TCC_BCHECK
 #else
 #  define CONFIG_TCC_BCHECK 1 /* enable bound checking code */
+#endif
+
+#if defined CONFIG_NEW_MACHO && CONFIG_NEW_MACHO==0
+#  undef CONFIG_NEW_MACHO
+#else
+#  define CONFIG_NEW_MACHO 1 /* enable new macho code */
 #endif
 
 #if defined TARGETOS_OpenBSD \
@@ -1798,6 +1803,7 @@ ST_FUNC void tcc_debug_putfile(TCCState *s1, const char *filename);
 ST_FUNC void tcc_debug_line(TCCState *s1);
 ST_FUNC void tcc_add_debug_info(TCCState *s1, int param, Sym *s, Sym *e);
 ST_FUNC void tcc_debug_funcstart(TCCState *s1, Sym *sym);
+ST_FUNC void tcc_debug_prolog_epilog(TCCState *s1, int value);
 ST_FUNC void tcc_debug_funcend(TCCState *s1, int size);
 ST_FUNC void tcc_debug_extern_sym(TCCState *s1, Sym *sym, int sh_num, int sym_bind, int sym_type);
 ST_FUNC void tcc_debug_typedef(TCCState *s1, Sym *sym);
