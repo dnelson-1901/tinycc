@@ -61,7 +61,7 @@ static int contains_any(const char *s, const char *list) {
 }
 
 static int ar_usage(int ret) {
-    fprintf(stderr, "usage: tcc -ar [rcstxv] lib [file...]\n");
+    fprintf(stderr, "usage: tcc -ar [crstvx] lib [files]\n");
     fprintf(stderr, "create library ([abdiopN] not supported).\n");
     return ret;
 }
@@ -70,11 +70,11 @@ ST_FUNC int tcc_tool_ar(TCCState *s1, int argc, char **argv)
 {
     static const ArHdr arhdr_init = {
         "/               ",
-        "            ",
+        "0           ",
         "0     ",
         "0     ",
         "0       ",
-        "          ",
+        "0         ",
         ARFMAG
         };
 
@@ -197,7 +197,7 @@ finish:
 
     funcmax = 250;
     afpos = tcc_realloc(NULL, funcmax * sizeof *afpos); // 250 func
-    memcpy(&arhdro.ar_mode, "100666", 6);
+    memcpy(&arhdro.ar_mode, "100644", 6);
 
     // i_obj = first input object file
     while (i_obj < argc)
@@ -302,13 +302,13 @@ finish:
     if ((hofs & 1)) // align
         hofs++, fpos = 1;
     // write header
-    fwrite("!<arch>\n", 8, 1, fh);
+    fwrite(ARMAG, 8, 1, fh);
     // create an empty archive
     if (!funccnt) {
         ret = 0;
         goto the_end;
     }
-    sprintf(stmp, "%-10d", (int)(strpos + (funccnt+1) * sizeof(int)));
+    sprintf(stmp, "%-10d", (int)(strpos + (funccnt+1) * sizeof(int)) + fpos);
     memcpy(&arhdr.ar_size, stmp, 10);
     fwrite(&arhdr, sizeof(arhdr), 1, fh);
     afpos[0] = le2belong(funccnt);

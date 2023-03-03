@@ -975,6 +975,7 @@ check_pc:
 		    break;
 	        case DW_LNS_set_file:
 		    i = dwarf_read_uleb128(&ln, end);
+		    i -= i > 0 && version < 5;
 		    if (i < FILE_TABLE_SIZE && i < filename_size)
 		        filename = filename_table[i].name;
 		    break;
