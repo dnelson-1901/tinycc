@@ -1220,6 +1220,13 @@ static unsigned int calc_vm_flags(unsigned int prot)
   return prot_bits;
 }
 
+enum cast_enum { FIRST, LAST };
+
+static void tst_cast(enum cast_enum ce)
+{
+    printf("%d\n", ce);
+}
+
 void bool_test()
 {
     int *s, a, b, t, f, i;
@@ -1265,6 +1272,12 @@ void bool_test()
     printf("exp=%d\n", f == (32 <= a && a <= 3));
     printf("r=%d\n", (t || f) + (t && f));
 
+    /* check that types of casted &&/|| are preserved (here the unsignedness) */
+    t = 1;
+    printf("type of bool: %d\n", (int) ( (~ ((unsigned int) (t && 1))) / 2) );
+    tst_cast(t >= 0 ? FIRST : LAST);
+
+    printf("type of cond: %d\n", (~(t ? 0U : (unsigned int)0)) / 2 );
     /* test ? : cast */
     {
         int aspect_on;
@@ -2876,7 +2889,8 @@ void relocation_test(void)
     printf("*rel2=%d\n", *rel2);
     fptr();
 #ifdef __LP64__
-    printf("pa_symbol=0x%lx\n", __pa_symbol() >> 63);
+    // compare 'addend' displacement versus conventional arithmetics
+    printf("pa_symbol: %d\n", (long)&rel1 == __pa_symbol() - 0x80000000);
 #endif
 }
 
@@ -3844,10 +3858,11 @@ int constant_p_var;
 
 int func(void);
 
-#if !defined _WIN32
+
 /* __builtin_clz and __builtin_ctz return random values for 0 */
 static void builtin_test_bits(unsigned long long x, int cnt[])
 {
+#if GCC_MAJOR >= 4
     cnt[0] += __builtin_ffs(x);
     cnt[1] += __builtin_ffsl(x);
     cnt[2] += __builtin_ffsll(x);
@@ -3860,9 +3875,12 @@ static void builtin_test_bits(unsigned long long x, int cnt[])
     if ((unsigned long) x) cnt[7] += __builtin_ctzl(x);
     if ((unsigned long long) x) cnt[8] += __builtin_ctzll(x);
 
+#if CC_NAME != CC_clang || GCC_MAJOR >= 11
+/* Apple clang 10 does not have __builtin_clrsb[l[l]] */
     cnt[9] += __builtin_clrsb(x);
     cnt[10] += __builtin_clrsbl(x);
     cnt[11] += __builtin_clrsbll(x);
+#endif
 
     cnt[12] += __builtin_popcount(x);
     cnt[13] += __builtin_popcountl(x);
@@ -3871,8 +3889,8 @@ static void builtin_test_bits(unsigned long long x, int cnt[])
     cnt[15] += __builtin_parity(x);
     cnt[16] += __builtin_parityl(x);
     cnt[17] += __builtin_parityll(x);
-}
 #endif
+}
 
 void builtin_test(void)
 {
@@ -3928,7 +3946,6 @@ void builtin_test(void)
 
     //printf("bera: %p\n", __builtin_extract_return_addr((void*)43));
 
-#if !defined _WIN32
     {
 	int cnt[18];
 	unsigned long long r = 0;
@@ -3945,7 +3962,6 @@ void builtin_test(void)
 	for (i = 0; i < 18; i++)
 	    printf ("%d %d\n", i, cnt[i]);
     }
-#endif
 }
 
 #if defined _WIN32

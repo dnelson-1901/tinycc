@@ -193,16 +193,18 @@ endif
 -include config-extra.mak
 
 ifneq ($(X),)
+ifneq ($(T),$(NATIVE_TARGET))
 # assume support files for cross-targets in "/usr/<triplet>" by default
-TRIPLET-i386 ?= i386-linux-gnu
+TRIPLET-i386 ?= i686-linux-gnu
 TRIPLET-x86_64 ?= x86_64-linux-gnu
-TRIPLET-arm ?= arm-linux-gnueabihf
+TRIPLET-arm ?= arm-linux-gnueabi
 TRIPLET-arm64 ?= aarch64-linux-gnu
 TRIPLET-riscv64 ?= riscv64-linux-gnu
 TR = $(if $(TRIPLET-$T),$T,ignored)
 CRT-$(TR) ?= /usr/$(TRIPLET-$T)/lib
 LIB-$(TR) ?= {B}:/usr/$(TRIPLET-$T)/lib
 INC-$(TR) ?= {B}/include:/usr/$(TRIPLET-$T)/include
+endif
 endif
 
 CORE_FILES = tcc.c tcctools.c libtcc.c tccpp.c tccgen.c tccdbg.c tccelf.c tccasm.c tccrun.c
@@ -244,12 +246,10 @@ $(TCC_FILES) : DEFINES += -DONE_SOURCE=0
 $(X)tccpp.o : $(TCCDEFS_H)
 endif
 
-FROM_GIT := $(shell git rev-parse >/dev/null 2>&1 && echo yes || echo no)
-
-ifeq ($(FROM_GIT),yes)
-GITHASH:=$(shell git rev-parse --abbrev-ref HEAD):$(shell git rev-parse --short HEAD) $(shell git log -1 --pretty='format:%cI')
-GITLOCAL:=$(shell git diff --quiet || echo ' locally modified')
-DEF_GITHASH:= -DTCC_GITHASH="\"$(GITHASH)$(GITLOCAL)\""
+GITHASH:=$(shell git rev-parse --abbrev-ref HEAD 2>/dev/null || echo no)
+ifneq ($(GITHASH),no)
+GITHASH:=$(shell git log -1 --pretty='format:%cs $(GITHASH)@%h')$(shell git diff --quiet || echo '*')
+DEF_GITHASH:= -DTCC_GITHASH="\"$(GITHASH)\""
 endif
 
 ifeq ($(CONFIG_debug),yes)
@@ -271,7 +271,7 @@ $(X)%.o : %.c $(LIBTCC_INC)
 
 # additional dependencies
 $(X)tcc.o : tcctools.c
-$(X)tcc.o : DEFINES += $(DEF_GITHASH) $(DEF_GITDATE)
+$(X)tcc.o : DEFINES += $(DEF_GITHASH)
 
 # Host Tiny C Compiler
 tcc$(EXESUF): tcc.o $(LIBTCC)
@@ -367,12 +367,14 @@ IBw = $(call IB,$(wildcard $1),$2)
 IF = $(if $1,$(IM) mkdir -p $2 && $(INSTALL) $1 $2)
 IFw = $(call IF,$(wildcard $1),$2)
 IR = $(IM) mkdir -p $2 && cp -r $1/. $2
-IM = $(info -> $2 : $1)@
+IM = @echo "-> $2 : $1" ;
+BINCHECK = $(if $(wildcard $(PROGS) *-tcc$(EXESUF)),,@echo "Makefile: nothing found to install" && exit 1)
 
 B_O = bcheck.o bt-exe.o bt-log.o bt-dll.o
 
 # install progs & libs
 install-unx:
+	$(call BINCHECK)
 	$(call IBw,$(PROGS) *-tcc,"$(bindir)")
 	$(call IFw,$(LIBTCC1) $(B_O) $(LIBTCC1_U),"$(tccdir)")
 	$(call IF,$(TOPSRC)/include/*.h $(TOPSRC)/tcclib.h,"$(tccdir)/include")
@@ -397,14 +399,15 @@ uninstall-unx:
 
 # install progs & libs on windows
 install-win:
-	$(call IBw,$(PROGS) $(PROGS_CROSS) $(subst libtcc.a,,$(LIBTCC)),"$(bindir)")
+	$(call BINCHECK)
+	$(call IBw,$(PROGS) *-tcc.exe libtcc.dll,"$(bindir)")
 	$(call IF,$(TOPSRC)/win32/lib/*.def,"$(tccdir)/lib")
 	$(call IFw,libtcc1.a $(B_O) $(LIBTCC1_W),"$(tccdir)/lib")
 	$(call IF,$(TOPSRC)/include/*.h $(TOPSRC)/tcclib.h,"$(tccdir)/include")
 	$(call IR,$(TOPSRC)/win32/include,"$(tccdir)/include")
 	$(call IR,$(TOPSRC)/win32/examples,"$(tccdir)/examples")
 	$(call IF,$(TOPSRC)/tests/libtcc_test.c,"$(tccdir)/examples")
-	$(call IFw,$(TOPSRC)/libtcc.h $(subst .dll,.def,$(LIBTCC)),"$(libdir)")
+	$(call IFw,$(TOPSRC)/libtcc.h libtcc.def,"$(libdir)")
 	$(call IFw,$(TOPSRC)/win32/tcc-win32.txt tcc-doc.html,"$(docdir)")
 ifneq "$(wildcard $(LIBTCC1_U))" ""
 	$(call IFw,$(LIBTCC1_U),"$(tccdir)/lib")
@@ -503,14 +506,15 @@ help:
 	@echo "   This file may contain some custom configuration.  For example:"
 	@echo "      NATIVE_DEFINES += -D..."
 	@echo "   Or for example to configure the search paths for a cross-compiler"
-	@echo "   that expects the linux files in <tccdir>/i386-linux:"
-	@echo "      ROOT-i386 = {B}/i386-linux"
-	@echo "      CRT-i386  = {B}/i386-linux/usr/lib"
-	@echo "      LIB-i386  = {B}/i386-linux/lib:{B}/i386-linux/usr/lib"
-	@echo "      INC-i386  = {B}/lib/include:{B}/i386-linux/usr/include"
+	@echo "   assuming the support files in /usr/i686-linux-gnu:"
+	@echo "      ROOT-i386 = /usr/i686-linux-gnu"
+	@echo "      CRT-i386  = {R}/lib"
+	@echo "      LIB-i386  = {B}:{R}/lib"
+	@echo "      INC-i386  = {B}/include:{R}/include (*)"
 	@echo "      DEF-i386  += -D__linux__"
-	@echo "   Or to configure a cross compiler for system-files in /usr/<triplet>"
-	@echo "      TRIPLET-arm-eabi = arm-linux-gnueabi"
+	@echo "   Or also, for the cross platform files in /usr/<triplet>"
+	@echo "      TRIPLET-i386 = i686-linux-gnu"
+	@echo "   (*) tcc replaces {B} by 'tccdir' and {R} by 'CONFIG_SYSROOT'"
 
 # --------------------------------------------------------------------------
 endif # ($(INCLUDED),no)

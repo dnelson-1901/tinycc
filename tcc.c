@@ -27,7 +27,7 @@
 static const char help[] =
     "Tiny C Compiler "TCC_VERSION" - Copyright (C) 2001-2006 Fabrice Bellard\n"
     "Usage: tcc [options...] [-o outfile] [-c] infile(s)...\n"
-    "       tcc [options...] -run infile [arguments...]\n"
+    "       tcc [options...] -run infile (or --) [arguments...]\n"
     "General options:\n"
     "  -c           compile only - generate an object file\n"
     "  -o outfile   set output filename\n"
@@ -289,6 +289,8 @@ redo:
     tcc_set_options(s, CONFIG_TCC_SWITCHES);
 #endif
     opt = tcc_parse_args(s, &argc, &argv, 1);
+    if (opt < 0)
+        return 1;
 
     if (n == 0) {
         if (opt == OPT_HELP) {
@@ -302,7 +304,7 @@ redo:
             return 0;
         }
         if (opt == OPT_M32 || opt == OPT_M64)
-            tcc_tool_cross(s, argv, opt); /* never returns */
+            return tcc_tool_cross(s, argv, opt);
         if (s->verbose)
             printf(version);
         if (opt == OPT_AR)
@@ -321,22 +323,22 @@ redo:
             return 0;
         }
 
-        if (s->nb_files == 0)
-            tcc_error("no input files");
-
-        if (s->output_type == TCC_OUTPUT_PREPROCESS) {
+        if (s->nb_files == 0) {
+            tcc_error_noabort("no input files");
+        } else if (s->output_type == TCC_OUTPUT_PREPROCESS) {
             if (s->outfile && 0!=strcmp("-",s->outfile)) {
                 ppfp = fopen(s->outfile, "w");
                 if (!ppfp)
-                    tcc_error("could not write '%s'", s->outfile);
+                    tcc_error_noabort("could not write '%s'", s->outfile);
             }
         } else if (s->output_type == TCC_OUTPUT_OBJ && !s->option_r) {
             if (s->nb_libraries)
-                tcc_error("cannot specify libraries with -c");
-            if (s->nb_files > 1 && s->outfile)
-                tcc_error("cannot specify output file with -c many files");
+                tcc_error_noabort("cannot specify libraries with -c");
+            else if (s->nb_files > 1 && s->outfile)
+                tcc_error_noabort("cannot specify output file with -c many files");
         }
-
+        if (s->nb_errors)
+            return 1;
         if (s->do_bench)
             start_time = getclock_ms();
     }
@@ -394,7 +396,7 @@ redo:
             if (!s->just_deps && tcc_output_file(s, s->outfile))
                 ret = 1;
             else if (s->gen_deps)
-                gen_makedeps(s, s->outfile, s->deps_outfile);
+                ret = gen_makedeps(s, s->outfile, s->deps_outfile);
         }
     }
 

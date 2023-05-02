@@ -65,12 +65,8 @@ extern long double strtold (const char *__nptr, char **__endptr);
 # ifndef __GNUC__
 #  define strtold (long double)strtod
 #  define strtof (float)strtod
-#  ifndef strtoll
-#   define strtoll _strtoi64
-#  endif
-#  ifndef strtoull
-#   define strtoull _strtoui64
-#  endif
+#  define strtoll _strtoi64
+#  define strtoull _strtoui64
 # endif
 # ifdef LIBTCC_AS_DLL
 #  define LIBTCCAPI __declspec(dllexport)
@@ -468,7 +464,7 @@ extern long double strtold (const char *__nptr, char **__endptr);
 
 #define INCLUDE_STACK_SIZE  32
 #define IFDEF_STACK_SIZE    64
-#define VSTACK_SIZE         256
+#define VSTACK_SIZE         512
 #define STRING_MAX_SIZE     1024
 #define TOKSTR_MAX_SIZE     256
 #define PACK_STACK_SIZE     8
@@ -499,6 +495,7 @@ typedef struct CString {
     int size; /* size in bytes */
     int size_allocated;
     void *data; /* either 'char *' or 'nwchar_t *' */
+    struct CString *prev;
 } CString;
 
 /* type definition */
@@ -548,7 +545,8 @@ struct SymAttr {
     nodecorate  : 1,
     dllimport   : 1,
     addrtaken   : 1,
-    xxxx        : 3; /* not used */
+    nodebug     : 1,
+    xxxx        : 2; /* not used */
 };
 
 /* function attributes or temporary attributes for parsing */
@@ -736,7 +734,7 @@ typedef struct ExprValue {
 #define MAX_ASM_OPERANDS 30
 typedef struct ASMOperand {
     int id; /* GCC 3 optional identifier (0 if number only supported) */
-    char *constraint;
+    char constraint[16];
     char asm_str[16]; /* computed asm string for operand */
     SValue *vt; /* C value of the expression */
     int ref_index; /* if >= 0, gives reference to a output constraint */
@@ -1004,7 +1002,7 @@ struct TCCState {
     /* benchmark info */
     int total_idents;
     int total_lines;
-    int total_bytes;
+    unsigned int total_bytes;
     unsigned int total_output[4];
 
     /* option -dnum (for general development purposes) */
@@ -1026,6 +1024,7 @@ struct TCCState {
     int deps_phony; /* option -MP */
     int argc;
     char **argv;
+    CString linker_arg; /* collect -Wl options */
 };
 
 struct filespec {
@@ -1212,6 +1211,8 @@ enum tcc_token {
 /* ------------ libtcc.c ------------ */
 
 ST_DATA struct TCCState *tcc_state;
+ST_DATA void** stk_data;
+ST_DATA int nb_stk_data;
 
 /* public functions currently used by the tcc main function */
 ST_FUNC char *pstrcpy(char *buf, size_t buf_size, const char *s);
@@ -1244,7 +1245,7 @@ PUB_FUNC char *tcc_strdup_debug(const char *str, const char *file, int line);
 #define realloc(p, s) use_tcc_realloc(p, s)
 #undef strdup
 #define strdup(s) use_tcc_strdup(s)
-PUB_FUNC void _tcc_error_noabort(const char *fmt, ...) PRINTF_LIKE(1,2);
+PUB_FUNC int _tcc_error_noabort(const char *fmt, ...) PRINTF_LIKE(1,2);
 PUB_FUNC NORETURN void _tcc_error(const char *fmt, ...) PRINTF_LIKE(1,2);
 PUB_FUNC void _tcc_warning(const char *fmt, ...) PRINTF_LIKE(1,2);
 #define tcc_internal_error(msg) tcc_error("internal compiler error\n"\
@@ -1261,10 +1262,16 @@ ST_FUNC void cstr_free(CString *cstr);
 ST_FUNC int cstr_printf(CString *cs, const char *fmt, ...) PRINTF_LIKE(2,3);
 ST_FUNC int cstr_vprintf(CString *cstr, const char *fmt, va_list ap);
 ST_FUNC void cstr_reset(CString *cstr);
-
 ST_FUNC void tcc_open_bf(TCCState *s1, const char *filename, int initlen);
 ST_FUNC int tcc_open(TCCState *s1, const char *filename);
 ST_FUNC void tcc_close(void);
+
+/* mark a memory pointer on stack for cleanup after errors */
+#define stk_push(p) dynarray_add(&stk_data, &nb_stk_data, p)
+#define stk_pop() (--nb_stk_data)
+/* mark CString on stack for cleanup errors */
+#define cstr_new_s(cstr) (cstr_new(cstr), stk_push(&(cstr)->data))
+#define cstr_free_s(cstr) (cstr_free(cstr), stk_pop())
 
 ST_FUNC int tcc_add_file_internal(TCCState *s1, const char *filename, int flags);
 /* flags: */
@@ -1373,9 +1380,6 @@ ST_INLN void define_push(int v, int macro_type, int *str, Sym *first_arg);
 ST_FUNC void define_undef(Sym *s);
 ST_INLN Sym *define_find(int v);
 ST_FUNC void free_defines(Sym *b);
-ST_FUNC Sym *label_find(int v);
-ST_FUNC Sym *label_push(Sym **ptop, int v, int flags);
-ST_FUNC void label_pop(Sym **ptop, Sym *slast, int keep);
 ST_FUNC void parse_define(void);
 ST_FUNC void preprocess(int is_bof);
 ST_FUNC void next(void);
@@ -1419,7 +1423,6 @@ ST_DATA SValue *vtop;
 ST_DATA int rsym, anon_sym, ind, loc;
 ST_DATA char debug_modes;
 
-ST_DATA int const_wanted; /* true if constant wanted */
 ST_DATA int nocode_wanted; /* true if no code generation wanted for an expression */
 ST_DATA int global_expr;  /* true if compound literals must be allocated globally (used during initializers parsing */
 ST_DATA CType func_vt; /* current function return type (used by return instruction) */
@@ -1453,6 +1456,9 @@ ST_FUNC void sym_pop(Sym **ptop, Sym *b, int keep);
 ST_FUNC Sym *sym_push2(Sym **ps, int v, int t, int c);
 ST_FUNC Sym *sym_find2(Sym *s, int v);
 ST_INLN Sym *sym_find(int v);
+ST_FUNC Sym *label_find(int v);
+ST_FUNC Sym *label_push(Sym **ptop, int v, int flags);
+ST_FUNC void label_pop(Sym **ptop, Sym *slast, int keep);
 ST_INLN Sym *struct_find(int v);
 
 ST_FUNC Sym *global_identifier_push(int v, int t, int c);
@@ -1487,8 +1493,8 @@ ST_FUNC int type_size(CType *type, int *a);
 ST_FUNC void mk_pointer(CType *type);
 ST_FUNC void vstore(void);
 ST_FUNC void inc(int post, int c);
-ST_FUNC void parse_mult_str (CString *astr, const char *msg);
-ST_FUNC void parse_asm_str(CString *astr);
+ST_FUNC CString* parse_mult_str(const char *msg);
+ST_FUNC CString* parse_asm_str(void);
 ST_FUNC void indir(void);
 ST_FUNC void unary(void);
 ST_FUNC void gexpr(void);
@@ -1792,8 +1798,8 @@ ST_FUNC int tcc_tool_ar(TCCState *s, int argc, char **argv);
 #ifdef TCC_TARGET_PE
 ST_FUNC int tcc_tool_impdef(TCCState *s, int argc, char **argv);
 #endif
-ST_FUNC void tcc_tool_cross(TCCState *s, char **argv, int option);
-ST_FUNC void gen_makedeps(TCCState *s, const char *target, const char *filename);
+ST_FUNC int tcc_tool_cross(TCCState *s, char **argv, int option);
+ST_FUNC int gen_makedeps(TCCState *s, const char *target, const char *filename);
 #endif
 
 /* ------------ tccdbg.c ------------ */
@@ -1920,7 +1926,9 @@ PUB_FUNC void tcc_exit_state(TCCState *s1);
 # define TCC_STATE_VAR(sym) tcc_state->sym
 # define TCC_SET_STATE(fn) fn
 # undef USING_GLOBALS
+# undef _tcc_error
 #else
 # define TCC_STATE_VAR(sym) s1->sym
 # define TCC_SET_STATE(fn) (tcc_enter_state(s1),fn)
+# define _tcc_error use_tcc_error_noabort
 #endif

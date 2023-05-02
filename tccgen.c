@@ -51,13 +51,23 @@ ST_DATA SValue *vtop;
 static SValue _vstack[1 + VSTACK_SIZE];
 #define vstack (_vstack + 1)
 
-ST_DATA int const_wanted; /* true if constant wanted */
 ST_DATA int nocode_wanted; /* no code generation wanted */
-#define unevalmask 0xffff /* unevaluated subexpression */
 #define NODATA_WANTED (nocode_wanted > 0) /* no static data output wanted either */
 #define DATA_ONLY_WANTED 0x80000000 /* ON outside of functions and for static initializers */
-#define CODE_OFF() (nocode_wanted |= 0x20000000)
-#define CODE_ON() (nocode_wanted &= ~0x20000000)
+
+/* no code output after unconditional jumps such as with if (0) ... */
+#define CODE_OFF_BIT 0x20000000
+#define CODE_OFF() if(!nocode_wanted)(nocode_wanted |= CODE_OFF_BIT)
+#define CODE_ON() (nocode_wanted &= ~CODE_OFF_BIT)
+
+/* no code output when parsing sizeof()/typeof() etc. (using nocode_wanted++/--) */
+#define NOEVAL_MASK 0x0000FFFF
+#define NOEVAL_WANTED (nocode_wanted & NOEVAL_MASK)
+
+/* no code output when parsing constant expressions */
+#define CONST_WANTED_BIT  0x00010000
+#define CONST_WANTED_MASK 0x0FFF0000
+#define CONST_WANTED  (nocode_wanted & CONST_WANTED_MASK)
 
 ST_DATA int global_expr;  /* true if compound literals must be allocated globally (used during initializers parsing */
 ST_DATA CType func_vt; /* current function return type (used by return instruction) */
@@ -374,7 +384,6 @@ ST_FUNC int tccgen_compile(TCCState *s1)
     funcname = "";
     func_ind = -1;
     anon_sym = SYM_FIRST_ANOM;
-    const_wanted = 0;
     nocode_wanted = DATA_ONLY_WANTED; /* no code outside of functions */
     local_scope = 0;
     debug_modes = (s1->do_debug ? 1 : 0) | s1->test_coverage << 1;
@@ -400,7 +409,7 @@ ST_FUNC int tccgen_compile(TCCState *s1)
 
 ST_FUNC void tccgen_finish(TCCState *s1)
 {
-    cstr_free(&initstr);
+    tcc_debug_end(s1); /* just in case of errors: free memory */
     free_inline_functions(s1);
     sym_pop(&global_stack, NULL, 0);
     sym_pop(&local_stack, NULL, 0);
@@ -409,6 +418,9 @@ ST_FUNC void tccgen_finish(TCCState *s1)
     /* free sym_pools */
     dynarray_reset(&sym_pools, &nb_sym_pools);
     sym_free_first = NULL;
+    global_label_stack = local_label_stack = NULL;
+    cstr_free(&initstr);
+    dynarray_reset(&stk_data, &nb_stk_data);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -750,6 +762,63 @@ ST_FUNC void sym_pop(Sym **ptop, Sym *b, int keep)
 	*ptop = b;
 }
 
+/* label lookup */
+ST_FUNC Sym *label_find(int v)
+{
+    v -= TOK_IDENT;
+    if ((unsigned)v >= (unsigned)(tok_ident - TOK_IDENT))
+        return NULL;
+    return table_ident[v]->sym_label;
+}
+
+ST_FUNC Sym *label_push(Sym **ptop, int v, int flags)
+{
+    Sym *s, **ps;
+    s = sym_push2(ptop, v, VT_STATIC, 0);
+    s->r = flags;
+    ps = &table_ident[v - TOK_IDENT]->sym_label;
+    if (ptop == &global_label_stack) {
+        /* modify the top most local identifier, so that
+           sym_identifier will point to 's' when popped */
+        while (*ps != NULL)
+            ps = &(*ps)->prev_tok;
+    }
+    s->prev_tok = *ps;
+    *ps = s;
+    return s;
+}
+
+/* pop labels until element last is reached. Look if any labels are
+   undefined. Define symbols if '&&label' was used. */
+ST_FUNC void label_pop(Sym **ptop, Sym *slast, int keep)
+{
+    Sym *s, *s1;
+    for(s = *ptop; s != slast; s = s1) {
+        s1 = s->prev;
+        if (s->r == LABEL_DECLARED) {
+            tcc_warning_c(warn_all)("label '%s' declared but not used", get_tok_str(s->v, NULL));
+        } else if (s->r == LABEL_FORWARD) {
+                tcc_error("label '%s' used but not defined",
+                      get_tok_str(s->v, NULL));
+        } else {
+            if (s->c) {
+                /* define corresponding symbol. A size of
+                   1 is put. */
+                put_extern_sym(s, cur_text_section, s->jnext, 1);
+            }
+        }
+        /* remove label */
+        if (s->r != LABEL_GONE)
+            table_ident[s->v - TOK_IDENT]->sym_label = s->prev_tok;
+        if (!keep)
+            sym_free(s);
+        else
+            s->r = LABEL_GONE;
+    }
+    if (!keep)
+        *ptop = slast;
+}
+
 /* ------------------------------------------------------------------------- */
 static void vcheck_cmp(void)
 {
@@ -765,7 +834,13 @@ static void vcheck_cmp(void)
        again, so that the VT_CMP/VT_JMP value will be in vtop
        when code is unsuppressed again. */
 
-    if (vtop->r == VT_CMP && !nocode_wanted)
+    /* However if it's just automatic suppression via CODE_OFF/ON()
+       then it seems that we better let things work undisturbed.
+       How can it work at all under nocode_wanted?  Well, gv() will
+       actually clear it at the gsym() in load()/VT_JMP in the
+       generator backends */
+
+    if (vtop->r == VT_CMP && 0 == (nocode_wanted & ~CODE_OFF_BIT))
         gv(RC_INT);
 }
 
@@ -930,9 +1005,11 @@ static void vset_VT_JMP(void)
     int op = vtop->cmp_op;
 
     if (vtop->jtrue || vtop->jfalse) {
+        int origt = vtop->type.t;
         /* we need to jump to 'mov $0,%R' or 'mov $1,%R' */
         int inv = op & (op < 2); /* small optimization */
         vseti(VT_JMP+inv, gvtst(inv, 0));
+        vtop->type.t |= origt & (VT_UNSIGNED | VT_DEFSIGN);
     } else {
         /* otherwise convert flags (rsp. 0/1) to register */
         vtop->c.i = op;
@@ -1067,6 +1144,7 @@ static void merge_symattr(struct SymAttr *sa, struct SymAttr *sa1)
       sa->aligned = sa1->aligned;
     sa->packed |= sa1->packed;
     sa->weak |= sa1->weak;
+    sa->nodebug |= sa1->nodebug;
     if (sa1->visibility != STV_DEFAULT) {
 	int vis = sa->visibility;
 	if (vis == STV_DEFAULT
@@ -2204,10 +2282,10 @@ static void gen_opic(int op)
     int t2 = v2->type.t & VT_BTYPE;
     int c1 = (v1->r & (VT_VALMASK | VT_LVAL | VT_SYM)) == VT_CONST;
     int c2 = (v2->r & (VT_VALMASK | VT_LVAL | VT_SYM)) == VT_CONST;
-    int nonconst = (v1->r | v2->r) & VT_NONCONST;
     uint64_t l1 = c1 ? v1->c.i : 0;
     uint64_t l2 = c2 ? v2->c.i : 0;
     int shm = (t1 == VT_LLONG) ? 63 : 31;
+    int r;
 
     if (t1 != VT_LLONG && (PTR_SIZE != 8 || t1 != VT_PTR))
         l1 = ((uint32_t)l1 |
@@ -2232,7 +2310,7 @@ static void gen_opic(int op)
         case TOK_UMOD:
             /* if division by zero, generate explicit division */
             if (l2 == 0) {
-                if (const_wanted && !(nocode_wanted & unevalmask))
+                if (CONST_WANTED && !NOEVAL_WANTED)
                     tcc_error("division by zero in constant");
                 goto general_case;
             }
@@ -2269,9 +2347,9 @@ static void gen_opic(int op)
 	    l1 = ((uint32_t)l1 |
 		(v1->type.t & VT_UNSIGNED ? 0 : -(l1 & 0x80000000)));
         v1->c.i = l1;
+        v1->r |= v2->r & VT_NONCONST;
         vtop--;
     } else {
-        nonconst = VT_NONCONST;
         /* if commutative ops, put c2 as constant */
         if (c1 && (op == '+' || op == '&' || op == '^' || 
                    op == '|' || op == '*' || op == TOK_EQ || op == TOK_NE)) {
@@ -2279,14 +2357,12 @@ static void gen_opic(int op)
             c2 = c1; //c = c1, c1 = c2, c2 = c;
             l2 = l1; //l = l1, l1 = l2, l2 = l;
         }
-        if (!const_wanted &&
-            c1 && ((l1 == 0 &&
+        if (c1 && ((l1 == 0 &&
                     (op == TOK_SHL || op == TOK_SHR || op == TOK_SAR)) ||
                    (l1 == -1 && op == TOK_SAR))) {
             /* treat (0 << x), (0 >> x) and (-1 >> x) as constant */
-            vtop--;
-        } else if (!const_wanted &&
-                   c2 && ((l2 == 0 && (op == '&' || op == '*')) ||
+            vpop();
+        } else if (c2 && ((l2 == 0 && (op == '&' || op == '*')) ||
                           (op == '|' &&
                             (l2 == -1 || (l2 == 0xFFFFFFFF && t2 != VT_LLONG))) ||
                           (l2 == 1 && (op == '%' || op == TOK_UMOD)))) {
@@ -2323,8 +2399,8 @@ static void gen_opic(int op)
             }
             goto general_case;
         } else if (c2 && (op == '+' || op == '-') &&
-                   (((vtop[-1].r & (VT_VALMASK | VT_LVAL | VT_SYM)) == (VT_CONST | VT_SYM))
-                    || (vtop[-1].r & (VT_VALMASK | VT_LVAL)) == VT_LOCAL)) {
+                   (r = vtop[-1].r & (VT_VALMASK | VT_LVAL | VT_SYM),
+                    r == (VT_CONST | VT_SYM) || r == VT_LOCAL)) {
             /* symbol + constant case */
             if (op == '-')
                 l2 = -l2;
@@ -2344,9 +2420,9 @@ static void gen_opic(int op)
                 else
                     gen_opi(op);
         }
+        if (vtop->r == VT_CONST)
+            vtop->r |= VT_NONCONST; /* is const, but only by optimization */
     }
-    if (vtop->r == VT_CONST)
-      vtop->r |= nonconst;
 }
 
 #if defined TCC_TARGET_X86_64 || defined TCC_TARGET_I386
@@ -2414,7 +2490,7 @@ static void gen_opif(int op)
         }
         /* NOTE: we only do constant propagation if finite number (not
            NaN or infinity) (ANSI spec) */
-        if (!(ieee_finite(f1) || !ieee_finite(f2)) && !const_wanted)
+        if (!(ieee_finite(f1) || !ieee_finite(f2)) && !CONST_WANTED)
             goto general_case;
         switch(op) {
         case '+': f1 += f2; break;
@@ -2425,7 +2501,7 @@ static void gen_opif(int op)
                 union { float f; unsigned u; } x1, x2, y;
 		/* If not in initializer we need to potentially generate
 		   FP exceptions at runtime, otherwise we want to fold.  */
-                if (!const_wanted)
+                if (!CONST_WANTED)
                     goto general_case;
                 /* the run-time result of 0.0/0.0 on x87, also of other compilers
                    when used to compile the f1 /= f2 below, would be -nan */
@@ -2867,8 +2943,7 @@ redo:
 	}
 	goto redo;
     } else if (!combine_types(&combtype, vtop - 1, vtop, op)) {
-        tcc_error_noabort("invalid operand types for binary operation");
-        vpop();
+        tcc_error("invalid operand types for binary operation");
     } else if (bt1 == VT_PTR || bt2 == VT_PTR) {
         /* at least one operand is a pointer */
         /* relational op: must be both pointers */
@@ -2903,7 +2978,7 @@ redo:
             vpush_type_size(pointed_type(&vtop[-1].type), &align);
             gen_op('*');
 #ifdef CONFIG_TCC_BCHECK
-            if (tcc_state->do_bounds_check && !const_wanted) {
+            if (tcc_state->do_bounds_check && !CONST_WANTED) {
                 /* if bounded pointers, we generate a special code to
                    test bounds */
                 if (op == '-') {
@@ -3086,7 +3161,10 @@ error:
 
         c = (vtop->r & (VT_VALMASK | VT_LVAL | VT_SYM)) == VT_CONST;
 #if !defined TCC_IS_NATIVE && !defined TCC_IS_NATIVE_387
-        c &= (dbt != VT_LDOUBLE) | !!nocode_wanted;
+        /* don't try to convert to ldouble when cross-compiling
+           (except when it's '0' which is needed for arm:gen_negf()) */
+        if (dbt_bt == VT_LDOUBLE && !nocode_wanted && (sf || vtop->c.i != 0))
+            c = 0;
 #endif
         if (c) {
             /* constant case: we can do it now */
@@ -3692,18 +3770,19 @@ ST_FUNC void inc(int post, int c)
         vpop(); /* if post op, return saved value */
 }
 
-ST_FUNC void parse_mult_str (CString *astr, const char *msg)
+ST_FUNC CString* parse_mult_str (const char *msg)
 {
     /* read the string */
     if (tok != TOK_STR)
         expect(msg);
-    cstr_new(astr);
+    cstr_reset(&initstr);
     while (tok == TOK_STR) {
         /* XXX: add \0 handling too ? */
-        cstr_cat(astr, tokc.str.data, -1);
+        cstr_cat(&initstr, tokc.str.data, -1);
         next();
     }
-    cstr_ccat(astr, '\0');
+    cstr_ccat(&initstr, '\0');
+    return &initstr;
 }
 
 /* If I is >= 1 and a power of two, returns log2(i)+1.
@@ -3728,7 +3807,7 @@ ST_FUNC int exact_log2p1(int i)
 static void parse_attribute(AttributeDef *ad)
 {
     int t, n;
-    CString astr;
+    char *astr;
     
 redo:
     if (tok != TOK_ATTRIBUTE1 && tok != TOK_ATTRIBUTE2)
@@ -3775,37 +3854,33 @@ redo:
         case TOK_SECTION1:
         case TOK_SECTION2:
             skip('(');
-	    parse_mult_str(&astr, "section name");
-            ad->section = find_section(tcc_state, (char *)astr.data);
+	    astr = parse_mult_str("section name")->data;
+            ad->section = find_section(tcc_state, astr);
             skip(')');
-	    cstr_free(&astr);
             break;
         case TOK_ALIAS1:
         case TOK_ALIAS2:
             skip('(');
-	    parse_mult_str(&astr, "alias(\"target\")");
-            ad->alias_target = /* save string as token, for later */
-                tok_alloc((char*)astr.data, astr.size-1)->tok;
+	    astr = parse_mult_str("alias(\"target\")")->data;
+            /* save string as token, for later */
+            ad->alias_target = tok_alloc_const(astr);
             skip(')');
-	    cstr_free(&astr);
             break;
 	case TOK_VISIBILITY1:
 	case TOK_VISIBILITY2:
             skip('(');
-	    parse_mult_str(&astr,
-			   "visibility(\"default|hidden|internal|protected\")");
-	    if (!strcmp (astr.data, "default"))
+	    astr = parse_mult_str("visibility(\"default|hidden|internal|protected\")")->data;
+	    if (!strcmp (astr, "default"))
 	        ad->a.visibility = STV_DEFAULT;
-	    else if (!strcmp (astr.data, "hidden"))
+	    else if (!strcmp (astr, "hidden"))
 	        ad->a.visibility = STV_HIDDEN;
-	    else if (!strcmp (astr.data, "internal"))
+	    else if (!strcmp (astr, "internal"))
 	        ad->a.visibility = STV_INTERNAL;
-	    else if (!strcmp (astr.data, "protected"))
+	    else if (!strcmp (astr, "protected"))
 	        ad->a.visibility = STV_PROTECTED;
 	    else
                 expect("visibility(\"default|hidden|internal|protected\")");
             skip(')');
-	    cstr_free(&astr);
             break;
         case TOK_ALIGNED1:
         case TOK_ALIGNED2:
@@ -3829,6 +3904,10 @@ redo:
         case TOK_WEAK1:
         case TOK_WEAK2:
             ad->a.weak = 1;
+            break;
+        case TOK_NODEBUG1:
+        case TOK_NODEBUG2:
+            ad->a.nodebug = 1;
             break;
         case TOK_UNUSED1:
         case TOK_UNUSED2:
@@ -4750,26 +4829,25 @@ static inline void convert_parameter_type(CType *pt)
     }
 }
 
-ST_FUNC void parse_asm_str(CString *astr)
+ST_FUNC CString* parse_asm_str(void)
 {
     skip('(');
-    parse_mult_str(astr, "string constant");
+    return parse_mult_str("string constant");
 }
 
 /* Parse an asm label and return the token */
 static int asm_label_instr(void)
 {
     int v;
-    CString astr;
+    char *astr;
 
     next();
-    parse_asm_str(&astr);
+    astr = parse_asm_str()->data;
     skip(')');
 #ifdef ASM_DEBUG
-    printf("asm_alias: \"%s\"\n", (char *)astr.data);
+    printf("asm_alias: \"%s\"\n", astr);
 #endif
-    v = tok_alloc(astr.data, astr.size - 1)->tok;
-    cstr_free(&astr);
+    v = tok_alloc_const(astr);
     return v;
 }
 
@@ -5384,7 +5462,11 @@ ST_FUNC void unary(void)
         t = VT_DOUBLE;
 	goto push_tokc;
     case TOK_CLDOUBLE:
+#ifdef TCC_USING_DOUBLE_FOR_LDOUBLE
+        t = VT_DOUBLE | VT_LONG;
+#else
         t = VT_LDOUBLE;
+#endif
 	goto push_tokc;
     case TOK_CLONG:
         t = (LONG_SIZE == 8 ? VT_LLONG : VT_INT) | VT_LONG;
@@ -5464,7 +5546,7 @@ ST_FUNC void unary(void)
             }
         } else if (tok == '{') {
 	    int saved_nocode_wanted = nocode_wanted;
-            if (const_wanted && !(nocode_wanted & unevalmask))
+            if (CONST_WANTED && !NOEVAL_WANTED)
                 expect("constant");
             if (0 == local_scope)
                 tcc_error("statement expression outside of function");
@@ -5779,17 +5861,19 @@ ST_FUNC void unary(void)
 	int has_match = 0;
 	int learn = 0;
 	TokenString *str = NULL;
-	int saved_const_wanted = const_wanted;
+	int saved_nocode_wanted = nocode_wanted;
+        nocode_wanted &= ~CONST_WANTED_MASK;
 
-	next();
+        next();
 	skip('(');
-	const_wanted = 0;
 	expr_type(&controlling_type, expr_eq);
 	controlling_type.t &= ~(VT_CONSTANT | VT_VOLATILE | VT_ARRAY);
 	if ((controlling_type.t & VT_BTYPE) == VT_FUNC)
 	  mk_pointer(&controlling_type);
-	const_wanted = saved_const_wanted;
-	for (;;) {
+
+        nocode_wanted = saved_nocode_wanted;
+
+        for (;;) {
 	    learn = 0;
 	    skip(',');
 	    if (tok == TOK_DEFAULT) {
@@ -6302,7 +6386,6 @@ static void expr_cond(void)
     int tt, u, r1, r2, rc, t1, t2, islv, c, g;
     SValue sv;
     CType type;
-    int ncw_prev;
 
     expr_lor();
     if (tok == '?') {
@@ -6325,7 +6408,6 @@ static void expr_cond(void)
             tt = gvtst(0, 0);
         }
 
-        ncw_prev = nocode_wanted;
         if (c == 0)
           nocode_wanted++;
         if (!g)
@@ -6344,11 +6426,20 @@ static void expr_cond(void)
         } else
           u = 0;
 
-        nocode_wanted = ncw_prev;
+        if (c == 0)
+          nocode_wanted--;
         if (c == 1)
           nocode_wanted++;
         skip(':');
         expr_cond();
+
+        if ((vtop->type.t & VT_BTYPE) == VT_FUNC)
+          mk_pointer(&vtop->type);
+
+        /* cast operands to correct type according to ISOC rules */
+        if (!combine_types(&type, &sv, vtop, '?'))
+          type_incompatibility_error(&sv.type, &vtop->type,
+            "type mismatch in conditional expression (have '%s' and '%s')");
 
         if (c < 0 && is_cond_bool(vtop) && is_cond_bool(&sv)) {
             /* optimize "if (f ? a > b : c || d) ..." for example, where normally
@@ -6361,18 +6452,11 @@ static void expr_cond(void)
             /* combine jump targets of 2nd op with VT_CMP of 1st op */
             gvtst_set(0, t1);
             gvtst_set(1, t2);
-            nocode_wanted = ncw_prev;
+            gen_cast(&type);
             //  tcc_warning("two conditions expr_cond");
             return;
         }
 
-        if ((vtop->type.t & VT_BTYPE) == VT_FUNC)
-          mk_pointer(&vtop->type);
-
-        /* cast operands to correct type according to ISOC rules */
-        if (!combine_types(&type, &sv, vtop, '?'))
-          type_incompatibility_error(&sv.type, &vtop->type,
-            "type mismatch in conditional expression (have '%s' and '%s')");
         /* keep structs lvalue by transforming `(expr ? a : b)` to `*(expr ? &a : &b)` so
            that `(expr ? a : b).mem` does not error  with "lvalue expected" */
         islv = (vtop->r & VT_LVAL) && (sv.r & VT_LVAL) && VT_STRUCT == (type.t & VT_BTYPE);
@@ -6399,7 +6483,8 @@ static void expr_cond(void)
             tt = gjmp(0);
         }
         gsym(u);
-        nocode_wanted = ncw_prev;
+        if (c == 1)
+          nocode_wanted--;
 
         /* this is horrible, but we must also convert first
            operand */
@@ -6460,11 +6545,9 @@ ST_FUNC void gexpr(void)
 /* parse a constant expression and return value in vtop.  */
 static void expr_const1(void)
 {
-    const_wanted++;
-    nocode_wanted += unevalmask + 1;
+    nocode_wanted += CONST_WANTED_BIT;
     expr_cond();
-    nocode_wanted -= unevalmask + 1;
-    const_wanted--;
+    nocode_wanted -= CONST_WANTED_BIT;
 }
 
 /* parse an integer constant and return its value. */
@@ -6472,7 +6555,7 @@ static inline int64_t expr_const64(void)
 {
     int64_t c;
     expr_const1();
-    if ((vtop->r & (VT_VALMASK | VT_LVAL | VT_SYM)) != VT_CONST)
+    if ((vtop->r & (VT_VALMASK | VT_LVAL | VT_SYM | VT_NONCONST)) != VT_CONST)
         expect("constant expression");
     c = vtop->c.i;
     vpop();
@@ -6752,9 +6835,6 @@ static void new_scope(struct scope *o)
     o->lstk = local_stack;
     o->llstk = local_label_stack;
     ++local_scope;
-
-    if (debug_modes)
-        tcc_debug_stabn(tcc_state, N_LBRAC, ind - func_ind);
 }
 
 static void prev_scope(struct scope *o, int is_expr)
@@ -6779,9 +6859,6 @@ static void prev_scope(struct scope *o, int is_expr)
     pop_local_syms(o->lstk, is_expr);
     cur_scope = o->prev;
     --local_scope;
-
-    if (debug_modes)
-        tcc_debug_stabn(tcc_state, N_RBRAC, ind - func_ind);
 }
 
 /* leave a scope via break/continue(/goto) */
@@ -6791,6 +6868,20 @@ static void leave_scope(struct scope *o)
         return;
     try_call_scope_cleanup(o->cl.s);
     vla_leave(o);
+}
+
+/* short versiona for scopes with 'if/do/while/switch' which can
+   declare only types (of struct/union/enum) */
+static void new_scope_s(struct scope *o)
+{
+    o->lstk = local_stack;
+    ++local_scope;
+}
+
+static void prev_scope_s(struct scope *o)
+{
+    sym_pop(&local_stack, o->lstk, 0);
+    --local_scope;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -6837,6 +6928,7 @@ again:
         tcc_tcov_check_line (tcc_state, 0), tcc_tcov_block_begin (tcc_state);
 
     if (t == TOK_IF) {
+        new_scope_s(&o);
         skip('(');
         gexpr();
         skip(')');
@@ -6851,8 +6943,10 @@ again:
         } else {
             gsym(a);
         }
+        prev_scope_s(&o);
 
     } else if (t == TOK_WHILE) {
+        new_scope_s(&o);
         d = gind();
         skip('(');
         gexpr();
@@ -6863,8 +6957,11 @@ again:
         gjmp_addr(d);
         gsym_addr(b, d);
         gsym(a);
+        prev_scope_s(&o);
 
     } else if (t == '{') {
+        if (debug_modes)
+            tcc_debug_stabn(tcc_state, N_LBRAC, ind - func_ind);
         new_scope(&o);
 
         /* handle local labels declarations */
@@ -6889,6 +6986,8 @@ again:
         }
 
         prev_scope(&o, is_expr);
+        if (debug_modes)
+            tcc_debug_stabn(tcc_state, N_RBRAC, ind - func_ind);
         if (local_scope)
             next();
         else if (!nocode_wanted)
@@ -6975,6 +7074,7 @@ again:
         prev_scope(&o, 0);
 
     } else if (t == TOK_DO) {
+        new_scope_s(&o);
         a = b = 0;
         d = gind();
         lblock(&a, &b);
@@ -6987,6 +7087,7 @@ again:
 	c = gvtst(0, 0);
 	gsym_addr(c, d);
         gsym(a);
+        prev_scope_s(&o);
 
     } else if (t == TOK_SWITCH) {
         struct switch_t *sw;
@@ -6998,17 +7099,18 @@ again:
         sw->nocode_wanted = nocode_wanted;
         cur_switch = sw;
 
+        new_scope_s(&o);
         skip('(');
         gexpr();
         skip(')');
         sw->sv = *vtop--; /* save switch value */
-
         a = 0;
         b = gjmp(0); /* jump to first case */
         lblock(&a, NULL);
         a = gjmp(a); /* add implicit break */
         /* case lookup */
         gsym(b);
+        prev_scope_s(&o);
 
         if (sw->nocode_wanted)
             goto skip_switch;
@@ -7068,8 +7170,7 @@ again:
         goto block_after_label;
 
     } else if (t == TOK_GOTO) {
-        if (cur_scope->vla.num)
-          vla_restore(cur_scope->vla.locorig);
+        vla_restore(cur_scope->vla.locorig);
         if (tok == '*' && gnu_ext) {
             /* computed goto */
             next();
@@ -7390,7 +7491,9 @@ static int decl_designator(init_params *p, CType *type, unsigned long c,
             c += index * elem_size;
         } else {
             f = *cur_field;
-	    while (f && (f->v & SYM_FIRST_ANOM) && (f->type.t & VT_BITFIELD))
+	    /* Skip bitfield padding. Also with size 32 and 64. */
+	    while (f && (f->v & SYM_FIRST_ANOM) &&
+		   is_integer_btype(f->type.t & VT_BTYPE))
 	        *cur_field = f = f->next;
             if (!f)
                 tcc_error("too many initializers");
@@ -7574,8 +7677,6 @@ static void init_putv(init_params *p, CType *type, unsigned long c)
                 else if (sizeof (long double) == sizeof (double))
                     __asm__("fldl %1\nfstpt %0\n" : "=m" (*ptr) : "m" (vtop->c.ld));
 #endif
-                else if (vtop->c.ld == 0.0)
-                    ;
                 else
 #endif
                 /* For other platforms it should work natively, but may not work
@@ -7583,7 +7684,9 @@ static void init_putv(init_params *p, CType *type, unsigned long c)
                 if (sizeof(long double) == LDOUBLE_SIZE)
                     memcpy(ptr, &vtop->c.ld, LDOUBLE_SIZE);
                 else if (sizeof(double) == LDOUBLE_SIZE)
-                    memcpy(ptr, &vtop->c.ld, LDOUBLE_SIZE);
+                    *(double*)ptr = (double)vtop->c.ld;
+                else if (0 == memcmp(ptr, &vtop->c.ld, LDOUBLE_SIZE))
+                    ; /* nothing to do for 0.0 */
 #ifndef TCC_CROSS_TEST
                 else
                     tcc_error("can't cross compile long double constants");
@@ -8262,29 +8365,23 @@ static void free_inline_functions(TCCState *s)
     dynarray_reset(&s->inline_fns, &s->nb_inline_fns);
 }
 
-static void do_Static_assert(void){
-    CString error_str;
+static void do_Static_assert(void)
+{
     int c;
+    const char *msg;
 
     next();
     skip('(');
     c = expr_const();
-
-    if (tok == ')') {
-    if (!c)
-        tcc_error("_Static_assert fail");
-    next();
-    goto static_assert_out;
+    msg = "_Static_assert fail";
+    if (tok == ',') {
+        next();
+        msg = parse_mult_str("string constant")->data;
     }
-
-    skip(',');
-    parse_mult_str(&error_str, "string constant");
-    if (c == 0)
-    tcc_error("%s", (char *)error_str.data);
-    cstr_free(&error_str);
     skip(')');
-  static_assert_out:
-        skip(';');
+    if (c == 0)
+        tcc_error("%s", msg);
+    skip(';');
 }
 
 /* 'l' is VT_LOCAL or VT_CONST to define default storage type
@@ -8298,10 +8395,11 @@ static int decl(int l)
     AttributeDef ad, adbase;
 
     while (1) {
-    if (tok == TOK_STATIC_ASSERT) {
-        do_Static_assert();
-        continue;
-    }
+
+        if (tok == TOK_STATIC_ASSERT) {
+            do_Static_assert();
+            continue;
+        }
 
         oldint = 0;
         if (!parse_btype(&btype, &adbase, l == VT_LOCAL)) {
