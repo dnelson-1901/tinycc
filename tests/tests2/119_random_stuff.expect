@@ -5,3 +5,4 @@ tst_pack1: size=5, j1.f = 5, i1.f = 5
 tst_pack2: size=6, j2.f = 5, i2.f = 5
 schar to ushort cast: ffff0033
 tst_indir_func 10
+5

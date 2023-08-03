@@ -334,7 +334,7 @@ libtcc1.a : tcc$(EXESUF) FORCE
 .PRECIOUS: %-libtcc1.a
 FORCE:
 
-run-if = $(if $(shell which $1),$S $1 $2)
+run-if = $(if $(shell command -v $1),$S $1 $2)
 S = $(if $(findstring yes,$(SILENT)),@$(info * $@))
 
 # --------------------------------------------------------------------------
@@ -415,7 +415,7 @@ ifneq "$(wildcard $(LIBTCC1_U))" ""
 endif
 
 # the msys-git shell works to configure && make except it does not have install
-ifeq ($(CONFIG_WIN32)-$(shell which install || echo no),yes-no)
+ifeq ($(CONFIG_WIN32)-$(shell command -v install || echo no),yes-no)
 install-win : INSTALL = cp
 install-win : INSTALLBIN = cp
 endif

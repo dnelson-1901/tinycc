@@ -99,12 +99,50 @@ BOOL WINAPI DllMain (HINSTANCE hDll, DWORD dwReason, LPVOID lpReserved)
 /* on win32, we suppose the lib and includes are at the location of 'tcc.exe' */
 static inline char *config_tccdir_w32(char *path)
 {
+    char temp[1024];
+    char try[1024];
     char *p;
+    int c;
     GetModuleFileName(tcc_module, path, MAX_PATH);
     p = tcc_basename(normalize_slashes(strlwr(path)));
     if (p > path)
         --p;
+
     *p = 0;
+
+    /*
+     * See if we are perhaps in a "bin/" subfolder of the
+     * installation path, in which case the real root of
+     * the installation is one level up. We can test this
+     * by looking for the 'include' folder.
+     */
+    strncpy(temp, path, sizeof(temp)-1);
+    strcat(temp, "/include");
+
+    if (_access(temp, 0) != 0) {
+        /* No 'include' folder found, so go up one level. */
+        strncpy(temp, path, sizeof(temp)-1);
+
+        /* Try this for several "levels" up. */
+        for (c = 0; c < 4; c++) {
+                p = tcc_basename(temp);
+                if (p > temp) {
+                    --p;
+                    *p = '\0';
+                }
+
+                strncpy(try, temp, sizeof(try)-1);
+                strcat(try, "/include");
+
+                if (_access(try, 0) == 0) {
+                        if (p != NULL)
+                                p = '\0';
+                        strcpy(path, temp);
+                        break;
+                }
+        }
+    }
+
     return path;
 }
 #define CONFIG_TCCDIR config_tccdir_w32(alloca(MAX_PATH))
@@ -466,7 +504,27 @@ PUB_FUNC void tcc_memcheck(int d)
     }
     POST_SEM(&mem_sem);
 }
+
 #endif /* MEM_DEBUG */
+
+#ifdef _WIN32
+# define realpath(file, buf) _fullpath(buf, file, 260)
+#endif
+
+/* for #pragma once */
+ST_FUNC int normalized_PATHCMP(const char *f1, const char *f2)
+{
+    char *p1, *p2;
+    int ret = 1;
+    if (!!(p1 = realpath(f1, NULL))) {
+        if (!!(p2 = realpath(f2, NULL))) {
+            ret = PATHCMP(p1, p2);
+            free(p2); /* using original free */
+        }
+        free(p1);
+    }
+    return ret;
+}
 
 #define free(p) use_tcc_free(p)
 #define malloc(s) use_tcc_malloc(s)
