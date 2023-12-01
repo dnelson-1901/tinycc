@@ -1604,6 +1604,7 @@ enum {
     TCC_OPTION_ba,
     TCC_OPTION_g,
     TCC_OPTION_c,
+    TCC_OPTION_dumpmachine,
     TCC_OPTION_dumpversion,
     TCC_OPTION_d,
     TCC_OPTION_static,
@@ -1682,6 +1683,7 @@ static const TCCOption tcc_options[] = {
 #ifdef TCC_TARGET_MACHO
     { "dynamiclib", TCC_OPTION_dynamiclib, 0 },
 #endif
+    { "dumpmachine", TCC_OPTION_dumpmachine, 0},
     { "dumpversion", TCC_OPTION_dumpversion, 0},
     { "d", TCC_OPTION_d, TCC_OPTION_HAS_ARG | TCC_OPTION_NOSEP },
     { "static", TCC_OPTION_static, 0 },
@@ -1994,7 +1996,7 @@ dorun:
             s->rt_num_callers = atoi(optarg); /* zero = default (6) */
         enable_backtrace:
             s->do_backtrace = 1;
-            s->do_debug = 1;
+            s->do_debug = s->do_debug ? s->do_debug : 1;
 	    s->dwarf = DWARF_VERSION;
             break;
 #ifdef CONFIG_TCC_BCHECK
@@ -2011,8 +2013,7 @@ dorun:
             } else if (isnum(*optarg)) {
                 x = *optarg - '0';
                 /* -g0 = no info, -g1 = lines/functions only, -g2 = full info */
-                if (x <= 2)
-                    s->do_debug = x;
+                s->do_debug = x > 2 ? 2 : x == 0 && s->do_backtrace ? 1 : x;
 #ifdef TCC_TARGET_PE
             } else if (0 == strcmp(".pdb", optarg)) {
                 s->dwarf = 5, s->do_debug |= 16;
@@ -2161,9 +2162,44 @@ dorun:
             break;
         case TCC_OPTION_MP:
             s->deps_phony = 1;
+            s->gen_phony_deps = 1;
             break;
         case TCC_OPTION_MT:
             s->deps_target = tcc_strdup(optarg);
+            break;
+        case TCC_OPTION_dumpmachine:
+            /* this is a best guess, please refine as necessary */
+            printf("%s",
+#ifdef TCC_TARGET_I386
+                   "i386-pc"
+#elif defined TCC_TARGET_X86_64
+                   "x86_64-pc"
+#elif defined TCC_TARGET_C67
+                   "c67"
+#elif defined TCC_TARGET_ARM
+                   "arm"
+#elif defined TCC_TARGET_ARM64
+                   "aarch64"
+#elif defined TCC_TARGET_RISCV64
+                   "riscv64"
+#endif
+                   "-"
+#ifdef TCC_TARGET_PE
+                   "mingw32"
+#elif defined(TCC_TARGET_MACHO)
+                   "apple-darwin"
+#elif TARGETOS_FreeBSD || TARGETOS_FreeBSD_kernel
+                   "freebsd"
+#elif TARGETOS_OpenBSD
+                   "openbsd"
+#elif TARGETOS_NetBSD
+                   "netbsd"
+#else
+                   "linux-gnu"
+#endif
+                   "\n"
+                   );
+            exit(0);
             break;
         case TCC_OPTION_dumpversion:
             printf ("%s\n", TCC_VERSION);

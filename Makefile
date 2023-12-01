@@ -58,8 +58,8 @@ else
       # `make test' when libtcc.dylib is used (configure --disable-static), so
       # we bake a relative path into the binary. $libdir is used after install.
       LINK_LIBTCC += -Wl,-rpath,"@executable_path/$(TOP)" -Wl,-rpath,"$(libdir)"
-      DYLIBVER += -current_version $(VERSION)
-      DYLIBVER += -compatibility_version $(VERSION)
+      DYLIBVER += -current_version $(MACOS_DYLIB_VERSION)
+      DYLIBVER += -compatibility_version $(MACOS_DYLIB_VERSION)
     endif
   endif
  endif
@@ -474,7 +474,7 @@ tcov-tes% : tcc_c$(EXESUF)
 	@rm -f $<.tcov
 	@$(MAKE) --no-print-directory TCC_LOCAL=$(CURDIR)/$< tes$*
 tcc_c$(EXESUF): $($T_FILES)
-	$S$(TCC) tcc.c -o $@ -ftest-coverage $(DEFINES)
+	$S$(TCC) tcc.c -o $@ -ftest-coverage $(DEFINES) $(LIBS)
 
 clean:
 	@rm -f tcc$(EXESUF) tcc_c$(EXESUF) tcc_p$(EXESUF) *-tcc$(EXESUF)
