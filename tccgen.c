@@ -43,8 +43,6 @@ static int nb_sym_pools;
 
 static Sym *all_cleanups, *pending_gotos;
 static int local_scope;
-static int in_sizeof;
-static int constant_p;
 ST_DATA char debug_modes;
 
 ST_DATA SValue *vtop;
@@ -130,6 +128,10 @@ typedef struct {
 static void init_prec(void);
 #endif
 
+static void block(int flags);
+#define STMT_EXPR 1
+#define STMT_COMPOUND 2
+
 static void gen_cast(CType *type);
 static void gen_cast_s(int t);
 static inline CType *pointed_type(CType *type);
@@ -139,7 +141,6 @@ static CType *type_decl(CType *type, AttributeDef *ad, int *v, int td);
 static void parse_expr_type(CType *type);
 static void init_putv(init_params *p, CType *type, unsigned long c);
 static void decl_initializer(init_params *p, CType *type, unsigned long c, int flags);
-static void block(int is_expr);
 static void decl_initializer_alloc(CType *type, AttributeDef *ad, int r, int has_init, int v, int scope);
 static int decl(int l);
 static void expr_eq(void);
@@ -2989,6 +2990,7 @@ redo:
             if (op != '-')
                 tcc_error("cannot use pointers here");
             vpush_type_size(pointed_type(&vtop[-1].type), &align);
+            vtop->type.t &= ~VT_UNSIGNED;
             vrott(3);
             gen_opic(op);
             vtop->type.t = VT_PTRDIFF_T;
@@ -3473,11 +3475,7 @@ static void vpush_type_size(CType *type, int *a)
         int size = type_size(type, a);
         if (size < 0)
             tcc_error("unknown type size");
-#if PTR_SIZE == 8
-        vpushll(size);
-#else
-        vpushi(size);
-#endif
+        vpushs(size);
     }
 }
 
@@ -4440,11 +4438,11 @@ do_decl:
             c = 0;
             flexible = 0;
             while (tok != '}') {
-                if (tok == TOK_STATIC_ASSERT) {
-                    do_Static_assert();
-                    continue;
-                }
                 if (!parse_btype(&btype, &ad1, 0)) {
+                    if (tok == TOK_STATIC_ASSERT) {
+                        do_Static_assert();
+                        continue;
+                    }
 		    skip(';');
 		    continue;
 		}
@@ -4851,7 +4849,7 @@ static inline void convert_parameter_type(CType *pt)
        to indicate a const function parameter */
     pt->t &= ~(VT_CONSTANT | VT_VOLATILE);
     /* array must be transformed to pointer according to ANSI C */
-    pt->t &= ~VT_ARRAY;
+    pt->t &= ~(VT_ARRAY | VT_VLA);
     if ((pt->t & VT_BTYPE) == VT_FUNC) {
         mk_pointer(pt);
     }
@@ -5076,7 +5074,8 @@ check:
         type->ref = s;
 
         if (vla_array_str) {
-	    if (t1 & VT_VLA)
+            /* for function args, the top dimension is converted to pointer */
+	    if ((t1 & VT_VLA) && (td & TYPE_NEST))
 	        s->vla_array_str = vla_array_str;
 	    else
 	        tok_str_free_str(vla_array_str);
@@ -5442,7 +5441,7 @@ static void parse_atomic(int atok)
 
 ST_FUNC void unary(void)
 {
-    int n, t, align, size, r, sizeof_caller;
+    int n, t, align, size, r;
     CType type;
     Sym *s;
     AttributeDef ad;
@@ -5451,8 +5450,6 @@ ST_FUNC void unary(void)
     if (debug_modes)
         tcc_debug_line(tcc_state), tcc_tcov_check_line (tcc_state, 1);
 
-    sizeof_caller = in_sizeof;
-    in_sizeof = 0;
     type.ref = NULL;
     /* XXX: GCC 2.95.3 does not generate a table although it should be
        better here */
@@ -5534,7 +5531,9 @@ ST_FUNC void unary(void)
         ad.section = rodata_section;
         decl_initializer_alloc(&type, &ad, VT_CONST, 2, 0, 0);
         break;
+    case TOK_SOTYPE:
     case '(':
+        t = tok;
         next();
         /* cast ? */
         if (parse_btype(&type, &ad, 0)) {
@@ -5552,11 +5551,10 @@ ST_FUNC void unary(void)
                     r |= VT_LVAL;
                 memset(&ad, 0, sizeof(AttributeDef));
                 decl_initializer_alloc(&type, &ad, r, 1, 0, 0);
+            } else if (t == TOK_SOTYPE) { /* from sizeof/alignof (...) */
+                vpush(&type);
+                return;
             } else {
-                if (sizeof_caller) {
-                    vpush(&type);
-                    return;
-                }
                 unary();
                 gen_cast(&type);
             }
@@ -5573,7 +5571,7 @@ ST_FUNC void unary(void)
 	       as statement expressions can't ever be entered from the
 	       outside, so any reactivation of code emission (from labels
 	       or loop heads) can be disabled again after the end of it. */
-            block(1);
+            block(STMT_EXPR);
             /* If the statement expr can be entered, then we retain the current
                nocode_wanted state (from e.g. a 'return 0;' in the stmt-expr).
                If it can't be entered then the state is that from before the
@@ -5637,8 +5635,9 @@ ST_FUNC void unary(void)
     case TOK_ALIGNOF3:
         t = tok;
         next();
-        in_sizeof++;
-        expr_type(&type, unary); /* Perform a in_sizeof = 0; */
+        if (tok == '(')
+            tok = TOK_SOTYPE;
+        expr_type(&type, unary);
         if (t == TOK_SIZEOF) {
             vpush_type_size(&type, &align);
             gen_cast_s(VT_SIZE_T);
@@ -5694,11 +5693,12 @@ ST_FUNC void unary(void)
 	}
         break;
     case TOK_builtin_constant_p:
-	constant_p = 1;
 	parse_builtin_params(1, "e");
-	n = constant_p &&
-	    (vtop->r & (VT_VALMASK | VT_LVAL)) == VT_CONST &&
-            !((vtop->r & VT_SYM) && vtop->sym->a.addrtaken);
+	n = 1;
+	if ((vtop->r & (VT_VALMASK | VT_LVAL)) != VT_CONST
+	    || ((vtop->r & VT_SYM) && vtop->sym->a.addrtaken)
+	    )
+	    n = 0;
 	vtop--;
 	vpushi(n);
         break;
@@ -5952,10 +5952,10 @@ special_math_val:
 
     default:
     tok_identifier:
+        if (tok < TOK_UIDENT)
+            tcc_error("expression expected before '%s'", get_tok_str(tok, &tokc));
         t = tok;
         next();
-        if (t < TOK_UIDENT)
-            expect("identifier");
         s = sym_find(t);
         if (!s || IS_ASM_SYM(s)) {
             const char *name = get_tok_str(t, NULL);
@@ -6551,13 +6551,19 @@ static void expr_eq(void)
 ST_FUNC void gexpr(void)
 {
     expr_eq();
-    while (tok == ',') {
-	constant_p &= (vtop->r & (VT_VALMASK | VT_LVAL)) == VT_CONST &&
-                      !((vtop->r & VT_SYM) && vtop->sym->a.addrtaken);
-        vpop();
-        next();
-        expr_eq();
-	convert_parameter_type (&vtop->type);
+    if (tok == ',') {
+        do {
+            vpop();
+            next();
+            expr_eq();
+        } while (tok == ',');
+
+        /* convert array & function to pointer */
+        convert_parameter_type(&vtop->type);
+
+        /* make builtin_constant_p((1,2)) return 0 (like on gcc) */
+        if ((vtop->r & VT_VALMASK) == VT_CONST && nocode_wanted && !CONST_WANTED)
+            gv(RC_TYPE(vtop->type.t));
     }
 }
 
@@ -6921,13 +6927,13 @@ static void lblock(int *bsym, int *csym)
     }
 }
 
-static void block(int is_expr)
+static void block(int flags)
 {
     int a, b, c, d, e, t;
     struct scope o;
     Sym *s;
 
-    if (is_expr) {
+    if (flags & STMT_EXPR) {
         /* default return value is (void) */
         vpushi(0);
         vtop->type.t = VT_VOID;
@@ -6996,13 +7002,13 @@ again:
         while (tok != '}') {
 	    decl(VT_LOCAL);
             if (tok != '}') {
-                if (is_expr)
+                if (flags & STMT_EXPR)
                     vpop();
-                block(is_expr);
+                block(flags | STMT_COMPOUND);
             }
         }
 
-        prev_scope(&o, is_expr);
+        prev_scope(&o, flags & STMT_EXPR);
         if (debug_modes)
             tcc_debug_stabn(tcc_state, N_RBRAC, ind - func_ind);
         if (local_scope)
@@ -7173,7 +7179,6 @@ again:
             cr->sym = gind();
         dynarray_add(&cur_switch->p, &cur_switch->n, cr);
         skip(':');
-        is_expr = 0;
         goto block_after_label;
 
     } else if (t == TOK_DEFAULT) {
@@ -7183,7 +7188,6 @@ again:
             tcc_error("too many 'default'");
         cur_switch->def_sym = cur_switch->nocode_wanted ? 1 : gind();
         skip(':');
-        is_expr = 0;
         goto block_after_label;
 
     } else if (t == TOK_GOTO) {
@@ -7258,20 +7262,24 @@ again:
             if (debug_modes)
                 tcc_tcov_reset_ind(tcc_state);
             vla_restore(cur_scope->vla.loc);
-            if (tok != '}')
-                goto again;
-            /* we accept this, but it is a mistake */
-            tcc_warning_c(warn_all)("deprecated use of label at end of compound statement");
 
+            if (tok != '}') {
+                if (0 == (flags & STMT_COMPOUND))
+                    goto again;
+                /* C23: insert implicit null-statement whithin compound statement */
+            } else {
+                /* we accept this, but it is a mistake */
+                tcc_warning_c(warn_all)("deprecated use of label at end of compound statement");
+            }
         } else {
             /* expression case */
             if (t != ';') {
                 unget_tok(t);
     expr:
-                if (is_expr) {
+                if (flags & STMT_EXPR) {
                     vpop();
                     gexpr();
-                } else if (!decl(VT_JMP)) {
+                } else {
                     gexpr();
                     vpop();
                 }
@@ -7322,10 +7330,8 @@ static void skip_or_save_block(TokenString **str)
 	      break;
 	}
     }
-    if (str) {
-	tok_str_add(*str, -1);
-	tok_str_add(*str, 0);
-    }
+    if (str)
+	tok_str_add(*str, TOK_EOF);
 }
 
 #define EXPR_CONST 1
@@ -8035,8 +8041,7 @@ static void decl_initializer_alloc(CType *type, AttributeDef *ad, int r,
                 tok_str_add_tok(init_str);
                 next();
             }
-            tok_str_add(init_str, -1);
-            tok_str_add(init_str, 0);
+            tok_str_add(init_str, TOK_EOF);
         } else
             skip_or_save_block(&init_str);
         unget_tok(0);
@@ -8273,8 +8278,8 @@ static void func_vla_arg(Sym *sym)
     Sym *arg;
 
     for (arg = sym->type.ref->next; arg; arg = arg->next)
-	if (arg->type.t & VT_VLA)
-	    func_vla_arg_code(arg);
+        if ((arg->type.t & VT_BTYPE) == VT_PTR && (arg->type.ref->type.t & VT_VLA))
+            func_vla_arg_code(arg->type.ref);
 }
 
 /* parse a function defined by symbol 'sym' and generate its code in
@@ -8426,11 +8431,6 @@ static int decl(int l)
 
     while (1) {
 
-        if (tok == TOK_STATIC_ASSERT) {
-            do_Static_assert();
-            continue;
-        }
-
         oldint = 0;
         if (!parse_btype(&btype, &adbase, l == VT_LOCAL)) {
             if (l == VT_JMP)
@@ -8438,6 +8438,10 @@ static int decl(int l)
             /* skip redundant ';' if not in old parameter decl scope */
             if (tok == ';' && l != VT_CMP) {
                 next();
+                continue;
+            }
+            if (tok == TOK_STATIC_ASSERT) {
+                do_Static_assert();
                 continue;
             }
             if (l != VT_CONST)
@@ -8635,6 +8639,7 @@ static int decl(int l)
                     has_init = (tok == '=');
                     if (has_init && (type.t & VT_VLA))
                         tcc_error("variable length array cannot be initialized");
+
                     if (((type.t & VT_EXTERN) && (!has_init || l != VT_CONST))
 		        || (type.t & VT_BTYPE) == VT_FUNC
                         /* as with GCC, uninitialized global arrays with no size
@@ -8645,20 +8650,6 @@ static int decl(int l)
                         /* external variable or function */
                         type.t |= VT_EXTERN;
                         sym = external_sym(v, &type, r, &ad);
-                        if (ad.alias_target) {
-                            /* Aliases need to be emitted when their target
-                               symbol is emitted, even if perhaps unreferenced.
-                               We only support the case where the base is
-                               already defined, otherwise we would need
-                               deferring to emit the aliases until the end of
-                               the compile unit.  */
-                            Sym *alias_target = sym_find(ad.alias_target);
-                            ElfSym *esym = elfsym(alias_target);
-                            if (!esym)
-                                tcc_error("unsupported forward __alias__ attribute");
-                            put_extern_sym2(sym, esym->st_shndx,
-                                            esym->st_value, esym->st_size, 1);
-                        }
                     } else {
                         if (l == VT_CONST || (type.t & VT_STATIC))
                             r |= VT_CONST;
@@ -8669,17 +8660,21 @@ static int decl(int l)
                         else if (l == VT_CONST)
                             /* uninitialized global variables may be overridden */
                             type.t |= VT_EXTERN;
-
-                        if (ad.alias_target && 1) {
-                            Sym *alias_target = sym_find(ad.alias_target);
-                            ElfSym *esym = elfsym(alias_target);
-                            if (!esym) tcc_error("unsupported forward __alias__ attribute");
-                            sym = external_sym(v, &type, r, &ad);
-                            put_extern_sym2(sym, esym->st_shndx,
-                                            esym->st_value, esym->st_size, 1);
-                        }
-
                         decl_initializer_alloc(&type, &ad, r, has_init, v, l == VT_CONST);
+                    }
+
+                    if (ad.alias_target && l == VT_CONST) {
+                        /* Aliases need to be emitted when their target symbol
+                           is emitted, even if perhaps unreferenced.
+                           We only support the case where the base is already
+                           defined, otherwise we would need deferring to emit
+                           the aliases until the end of the compile unit.  */
+                        Sym *alias_target = sym_find(ad.alias_target);
+                        ElfSym *esym = elfsym(alias_target);
+                        if (!esym)
+                            tcc_error("unsupported forward __alias__ attribute");
+                        put_extern_sym2(sym_find(v), esym->st_shndx,
+                                        esym->st_value, esym->st_size, 1);
                     }
                 }
                 if (tok != ',') {
