@@ -139,21 +139,6 @@ ST_FUNC void tccelf_delete(TCCState *s1)
 
     tcc_free(s1->sym_attrs);
     symtab_section = NULL; /* for tccrun.c:rt_printline() */
-
-    /* free any loaded DLLs */
-#ifdef TCC_IS_NATIVE
-    for ( i = 0; i < s1->nb_loaded_dlls; i++) {
-        DLLReference *ref = s1->loaded_dlls[i];
-        if ( ref->handle )
-# ifdef _WIN32
-            FreeLibrary((HMODULE)ref->handle);
-# else
-            dlclose(ref->handle);
-# endif
-    }
-#endif
-    /* free loaded dlls array */
-    dynarray_reset(&s1->loaded_dlls, &s1->nb_loaded_dlls);
 }
 
 /* save section data state */
@@ -168,8 +153,11 @@ ST_FUNC void tccelf_begin_file(TCCState *s1)
     s = s1->symtab, s->reloc = s->hash, s->hash = NULL;
 #if defined TCC_TARGET_X86_64 && defined TCC_TARGET_PE
     s1->uw_sym = 0;
+    s1->uw_offs = 0;
 #endif
 }
+
+static void update_relocs(TCCState *s1, Section *s, int *old_to_new_syms, int first_sym);
 
 /* At the end of compilation, convert any UNDEF syms to global, and merge
    with previously existing symbols */
@@ -187,7 +175,6 @@ ST_FUNC void tccelf_end_file(TCCState *s1)
 
     for (i = 0; i < nb_syms; ++i) {
         ElfSym *sym = (ElfSym*)s->data + first_sym + i;
-
         if (sym->st_shndx == SHN_UNDEF) {
             int sym_bind = ELFW(ST_BIND)(sym->st_info);
             int sym_type = ELFW(ST_TYPE)(sym->st_info);
@@ -202,26 +189,12 @@ ST_FUNC void tccelf_end_file(TCCState *s1)
 #endif
             sym->st_info = ELFW(ST_INFO)(sym_bind, sym_type);
         }
-
         tr[i] = set_elf_sym(s, sym->st_value, sym->st_size, sym->st_info,
             sym->st_other, sym->st_shndx, (char*)s->link->data + sym->st_name);
     }
     /* now update relocations */
-    for (i = 1; i < s1->nb_sections; i++) {
-        Section *sr = s1->sections[i];
-        if (sr->sh_type == SHT_RELX && sr->link == s) {
-            ElfW_Rel *rel = (ElfW_Rel*)(sr->data + sr->sh_offset);
-            ElfW_Rel *rel_end = (ElfW_Rel*)(sr->data + sr->data_offset);
-            for (; rel < rel_end; ++rel) {
-                int n = ELFW(R_SYM)(rel->r_info) - first_sym;
-                if (n < 0) /* zero sym_index in reloc (can happen with asm) */
-                    continue;
-                rel->r_info = ELFW(R_INFO)(tr[n], ELFW(R_TYPE)(rel->r_info));
-            }
-        }
-    }
+    update_relocs(s1, s, tr, first_sym);
     tcc_free(tr);
-
     /* record text/data/bss output for -bench info */
     for (i = 0; i < 4; ++i) {
         s = s1->sections[i + 1];
@@ -816,7 +789,7 @@ ST_FUNC struct sym_attr *get_sym_attr(TCCState *s1, int index, int alloc)
     return &s1->sym_attrs[index];
 }
 
-static void modify_reloctions_old_to_new(TCCState *s1, Section *s, int *old_to_new_syms)
+static void update_relocs(TCCState *s1, Section *s, int *old_to_new_syms, int first_sym)
 {
     int i, type, sym_index;
     Section *sr;
@@ -828,6 +801,8 @@ static void modify_reloctions_old_to_new(TCCState *s1, Section *s, int *old_to_n
             for_each_elem(sr, 0, rel, ElfW_Rel) {
                 sym_index = ELFW(R_SYM)(rel->r_info);
                 type = ELFW(R_TYPE)(rel->r_info);
+                if ((sym_index -= first_sym) < 0)
+                    continue; /* zero sym_index in reloc (can happen with asm) */
                 sym_index = old_to_new_syms[sym_index];
                 rel->r_info = ELFW(R_INFO)(sym_index, type);
             }
@@ -878,8 +853,7 @@ static void sort_syms(TCCState *s1, Section *s)
     memcpy(s->data, new_syms, nb_syms * sizeof(ElfW(Sym)));
     tcc_free(new_syms);
 
-    modify_reloctions_old_to_new(s1, s, old_to_new_syms);
-
+    update_relocs(s1, s, old_to_new_syms, 0);
     tcc_free(old_to_new_syms);
 }
 
@@ -1027,7 +1001,7 @@ static void update_gnu_hash(TCCState *s1, Section *gnu_hash)
     tcc_free(buck);
     tcc_free(nextbuck);
 
-    modify_reloctions_old_to_new(s1, dynsym, old_to_new_syms);
+    update_relocs(s1, dynsym, old_to_new_syms, 0);
 
     /* modify the versions */
     vs = versym_section;
@@ -1582,14 +1556,15 @@ static void put_ptr(TCCState *s1, Section *s, int offs)
 ST_FUNC void tcc_add_btstub(TCCState *s1)
 {
     Section *s;
-    int n, o;
+    int n, o, *p;
     CString cstr;
+    const char *__rt_info = &"___rt_info"[!s1->leading_underscore];
 
     s = data_section;
     /* Align to PTR_SIZE */
     section_ptr_add(s, -s->data_offset & (PTR_SIZE - 1));
     o = s->data_offset;
-    /* create (part of) a struct rt_context (see tccrun.c) */
+    /* create a struct rt_context (see tccrun.c) */
     if (s1->dwarf) {
         put_ptr(s1, dwarf_line_section, 0);
         put_ptr(s1, dwarf_line_section, -1);
@@ -1604,18 +1579,23 @@ ST_FUNC void tcc_add_btstub(TCCState *s1)
         put_ptr(s1, stab_section, -1);
         put_ptr(s1, stab_section->link, 0);
     }
-    *(addr_t *)section_ptr_add(s, PTR_SIZE) = s1->dwarf;
+
     /* skip esym_start/esym_end/elf_str (not loaded) */
     section_ptr_add(s, 3 * PTR_SIZE);
-    /* prog_base : local nameless symbol with offset 0 at SHN_ABS */
-    put_ptr(s1, NULL, 0);
+
+    if (s1->output_type == TCC_OUTPUT_MEMORY && 0 == s1->dwarf) {
+        put_ptr(s1, text_section, 0);
+    } else {
+        /* prog_base : local nameless symbol with offset 0 at SHN_ABS */
+        put_ptr(s1, NULL, 0);
 #if defined TCC_TARGET_MACHO
-    /* adjust for __PAGEZERO */
-    if (s1->dwarf == 0 && s1->output_type == TCC_OUTPUT_EXE)
-        write64le(data_section->data + data_section->data_offset - PTR_SIZE,
-	          (uint64_t)1 << 32);
+        /* adjust for __PAGEZERO */
+        if (s1->dwarf == 0 && s1->output_type == TCC_OUTPUT_EXE)
+            write64le(data_section->data + data_section->data_offset - PTR_SIZE,
+	              (uint64_t)1 << 32);
 #endif
-    n = 2 * PTR_SIZE;
+    }
+    n = 3 * PTR_SIZE;
 #ifdef CONFIG_TCC_BCHECK
     if (s1->do_bounds_check) {
         put_ptr(s1, bounds_section, 0);
@@ -1623,6 +1603,16 @@ ST_FUNC void tcc_add_btstub(TCCState *s1)
     }
 #endif
     section_ptr_add(s, n);
+    p = section_ptr_add(s, 2 * sizeof (int));
+    p[0] = s1->rt_num_callers;
+    p[1] = s1->dwarf;
+    // if (s->data_offset - o != 10*PTR_SIZE + 2*sizeof (int)) exit(99);
+
+    if (s1->output_type == TCC_OUTPUT_MEMORY) {
+        set_global_sym(s1, __rt_info, s, o);
+        return;
+    }
+
     cstr_new(&cstr);
     cstr_printf(&cstr,
         "extern void __bt_init(),__bt_exit(),__bt_init_dll();"
@@ -1637,14 +1627,14 @@ ST_FUNC void tcc_add_btstub(TCCState *s1)
 #endif
 #endif
     cstr_printf(&cstr, "__bt_init(__rt_info,%d);}",
-        s1->output_type == TCC_OUTPUT_DLL ? 0 : s1->rt_num_callers + 1);
+        s1->output_type != TCC_OUTPUT_DLL);
     /* In case dlcose is called by application */
     cstr_printf(&cstr,
         "__attribute__((destructor)) static void __bt_exit_rt(){"
         "__bt_exit(__rt_info);}");
     tcc_compile_string_no_debug(s1, cstr.data);
     cstr_free(&cstr);
-    set_local_sym(s1, &"___rt_info"[!s1->leading_underscore], s, o);
+    set_local_sym(s1, __rt_info, s, o);
 }
 #endif /* def CONFIG_TCC_BACKTRACE */
 
@@ -1777,8 +1767,8 @@ ST_FUNC void tcc_add_runtime(TCCState *s1)
                 tcc_add_support(s1, "bt-exe.o");
             if (s1->output_type != TCC_OUTPUT_DLL)
                 tcc_add_support(s1, "bt-log.o");
-            if (s1->output_type != TCC_OUTPUT_MEMORY)
-                tcc_add_btstub(s1);
+            tcc_add_btstub(s1);
+            lpthread = 1;
         }
 #endif
         if (lpthread)

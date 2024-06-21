@@ -89,15 +89,6 @@ extern long double strtold (const char *__nptr, char **__endptr);
 # ifndef va_copy
 #  define va_copy(a,b) a = b
 # endif
-# undef CONFIG_TCC_STATIC
-#endif
-
-#ifndef PAGESIZE
-# ifdef _SC_PAGESIZE
-#   define PAGESIZE sysconf(_SC_PAGESIZE)
-# else
-#   define PAGESIZE 4096
-# endif
 #endif
 
 #ifndef O_BINARY
@@ -143,7 +134,7 @@ extern long double strtold (const char *__nptr, char **__endptr);
 /* include file debug */
 /* #define INC_DEBUG */
 /* memory leak debug (only for single threaded usage) */
-/* #define MEM_DEBUG */
+/* #define MEM_DEBUG 1,2,3 */
 /* assembler debug */
 /* #define ASM_DEBUG */
 
@@ -495,7 +486,7 @@ typedef int nwchar_t;
 typedef struct CString {
     int size; /* size in bytes */
     int size_allocated;
-    void *data; /* either 'char *' or 'nwchar_t *' */
+    char *data; /* nwchar_t* in cases */
 } CString;
 
 /* type definition */
@@ -511,7 +502,7 @@ typedef union CValue {
     float f;
     uint64_t i;
     struct {
-        const void *data;
+        char *data;
         int size;
     } str;
     int tab[LDOUBLE_SIZE/4];
@@ -642,6 +633,7 @@ typedef struct DLLReference {
 #define FUNC_FASTCALL2 3 /* first parameters in %eax, %edx */
 #define FUNC_FASTCALL3 4 /* first parameter in %eax, %edx, %ecx */
 #define FUNC_FASTCALLW 5 /* first parameter in %ecx, %edx */
+#define FUNC_THISCALL  6 /* first param in %ecx */
 
 /* field 'Sym.t' for macros */
 #define MACRO_OBJ      0 /* object like macro */
@@ -995,11 +987,16 @@ struct TCCState {
 
 #ifdef TCC_IS_NATIVE
     const char *run_main; /* entry for tcc_run() */
-    void *run_ptr; /* ptr to runtime_memory */
+    void *run_ptr; /* runtime_memory */
     unsigned run_size; /* size of runtime_memory  */
 #ifdef _WIN64
     void *run_function_table; /* unwind data */
 #endif
+    struct TCCState *next;
+    struct rt_context *rc; /* pointer to backtrace info block */
+    void *run_lj, *run_jb; /* sj/lj for tcc_setjmp()/tcc_run() */
+    TCCBtFunc *bt_func;
+    void *bt_data;
 #endif
 
 #ifdef CONFIG_TCC_BACKTRACE
@@ -1161,7 +1158,7 @@ struct filespec {
 #define TOK_TWODOTS 0xa2 /* C++ token ? */
 #define TOK_TWOSHARPS 0xa3 /* ## preprocessing token */
 #define TOK_PLCHLDR 0xa4 /* placeholder token as defined in C99 */
-#define TOK_PPJOIN  0xa6 /* A '##' in the right position to mean pasting */
+#define TOK_PPJOIN  (TOK_TWOSHARPS | SYM_FIELD) /* A '##' in a macro to mean pasting */
 #define TOK_SOTYPE  0xa7 /* alias of '(' for parsing sizeof (type) */
 
 /* assignment operators */
@@ -1248,6 +1245,7 @@ PUB_FUNC void *tcc_realloc_debug(void *ptr, unsigned long size, const char *file
 PUB_FUNC char *tcc_strdup_debug(const char *str, const char *file, int line);
 #endif
 
+ST_FUNC void libc_free(void *ptr);
 #define free(p) use_tcc_free(p)
 #define malloc(s) use_tcc_malloc(s)
 #define realloc(p, s) use_tcc_realloc(p, s)
@@ -1256,8 +1254,8 @@ PUB_FUNC char *tcc_strdup_debug(const char *str, const char *file, int line);
 PUB_FUNC int _tcc_error_noabort(const char *fmt, ...) PRINTF_LIKE(1,2);
 PUB_FUNC NORETURN void _tcc_error(const char *fmt, ...) PRINTF_LIKE(1,2);
 PUB_FUNC void _tcc_warning(const char *fmt, ...) PRINTF_LIKE(1,2);
-#define tcc_internal_error(msg) tcc_error("internal compiler error\n"\
-        "%s:%d: in %s(): " msg, __FILE__,__LINE__,__FUNCTION__)
+#define tcc_internal_error(msg) \
+    tcc_error("internal compiler error in %s:%d: %s", __FUNCTION__,__LINE__,msg)
 
 /* other utilities */
 ST_FUNC void dynarray_add(void *ptab, int *nb_ptr, void *data);
@@ -1394,6 +1392,7 @@ ST_FUNC void define_undef(Sym *s);
 ST_INLN Sym *define_find(int v);
 ST_FUNC void free_defines(Sym *b);
 ST_FUNC void parse_define(void);
+ST_FUNC void skip_to_eol(int warn);
 ST_FUNC void preprocess(int is_bof);
 ST_FUNC void next(void);
 ST_INLN void unget_tok(int last_tok);
@@ -1401,6 +1400,7 @@ ST_FUNC void preprocess_start(TCCState *s1, int filetype);
 ST_FUNC void preprocess_end(TCCState *s1);
 ST_FUNC void tccpp_new(TCCState *s);
 ST_FUNC void tccpp_delete(TCCState *s);
+ST_FUNC void tccpp_putfile(const char *filename);
 ST_FUNC int tcc_preprocess(TCCState *s1);
 ST_FUNC void skip(int c);
 ST_FUNC NORETURN void expect(const char *msg);
@@ -1826,7 +1826,7 @@ ST_FUNC void tcc_debug_start(TCCState *s1);
 ST_FUNC void tcc_debug_end(TCCState *s1);
 ST_FUNC void tcc_debug_bincl(TCCState *s1);
 ST_FUNC void tcc_debug_eincl(TCCState *s1);
-ST_FUNC void tcc_debug_putfile(TCCState *s1, const char *filename);
+ST_FUNC void tcc_debug_newfile(TCCState *s1);
 
 ST_FUNC void tcc_debug_line(TCCState *s1);
 ST_FUNC void tcc_add_debug_info(TCCState *s1, int param, Sym *s, Sym *e);
@@ -1855,16 +1855,16 @@ ST_FUNC void tcc_tcov_reset_ind(TCCState *s1);
 #define dwarf_str_section       s1->dwarf_str_section
 #define dwarf_line_str_section  s1->dwarf_line_str_section
 
-/* default dwarf version for "-g". use 0 to emit stab debug infos */
-#ifndef DWARF_VERSION
-# define DWARF_VERSION 0
-#endif
-
 /* default dwarf version for "-gdwarf" */
 #ifdef TCC_TARGET_MACHO
 # define DEFAULT_DWARF_VERSION 2
 #else
 # define DEFAULT_DWARF_VERSION 5
+#endif
+
+/* default dwarf version for "-g". use 0 to emit stab debug infos */
+#ifndef DWARF_VERSION
+# define DWARF_VERSION 0 //DEFAULT_DWARF_VERSION
 #endif
 
 #if defined TCC_TARGET_PE
@@ -1947,4 +1947,42 @@ PUB_FUNC void tcc_exit_state(TCCState *s1);
 # define TCC_STATE_VAR(sym) s1->sym
 # define TCC_SET_STATE(fn) (tcc_enter_state(s1),fn)
 # define _tcc_error use_tcc_error_noabort
+#endif
+
+#if CONFIG_TCC_SEMLOCK && TCC_SEM_IMPL
+#undef TCC_SEM_IMPL
+#if defined _WIN32
+ST_FUNC void wait_sem(TCCSem *p)
+{
+    if (!p->init)
+        InitializeCriticalSection(&p->cr), p->init = 1;
+    EnterCriticalSection(&p->cr);
+}
+ST_FUNC void post_sem(TCCSem *p)
+{
+    LeaveCriticalSection(&p->cr);
+}
+#elif defined __APPLE__
+ST_FUNC void wait_sem(TCCSem *p)
+{
+    if (!p->init)
+        p->sem = dispatch_semaphore_create(1), p->init = 1;
+    dispatch_semaphore_wait(p->sem, DISPATCH_TIME_FOREVER);
+}
+ST_FUNC void post_sem(TCCSem *p)
+{
+    dispatch_semaphore_signal(p->sem);
+}
+#else
+ST_FUNC void wait_sem(TCCSem *p)
+{
+    if (!p->init)
+        sem_init(&p->sem, 0, 1), p->init = 1;
+    while (sem_wait(&p->sem) < 0 && errno == EINTR);
+}
+ST_FUNC void post_sem(TCCSem *p)
+{
+    sem_post(&p->sem);
+}
+#endif
 #endif

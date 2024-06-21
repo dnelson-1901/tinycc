@@ -10,13 +10,11 @@ extern "C" {
 #endif
 
 /*****************************/
-/* set custom allocator for all allocations (optional) */
-
+/* set custom allocator for all allocations (optional), NULL for default. */
 typedef void *TCCReallocFunc(void *ptr, unsigned long size);
 LIBTCCAPI void tcc_set_realloc(TCCReallocFunc *my_realloc);
 
 /*****************************/
-
 typedef struct TCCState TCCState;
 
 /* create a new TCC compilation context */
@@ -99,6 +97,17 @@ LIBTCCAPI void *tcc_get_symbol(TCCState *s, const char *name);
 /* list all (global) symbols and their values via 'symbol_cb()' */
 LIBTCCAPI void tcc_list_symbols(TCCState *s, void *ctx,
     void (*symbol_cb)(void *ctx, const char *name, const void *val));
+
+/* experimental/advanced section (see libtcc_test_mt.c for an example) */
+
+/* catch runtime exceptions (optionally limit backtraces at top_func),
+   when using tcc_set_options("-bt") and when not using tcc_run() */
+LIBTCCAPI void *_tcc_setjmp(TCCState *s1, void *jmp_buf, void *top_func, void *longjmp);
+#define tcc_setjmp(s1,jb,f) setjmp(_tcc_setjmp(s1, jb, f, longjmp))
+
+/* custom error printer for runtime exceptions. Returning 0 stops backtrace */
+typedef int TCCBtFunc(void *udata, void *pc, const char *file, int line, const char* func, const char *msg);
+LIBTCCAPI void tcc_set_backtrace_func(TCCState *s1, void* userdata, TCCBtFunc*);
 
 #ifdef __cplusplus
 }

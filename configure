@@ -366,7 +366,7 @@ case $targetos in
     default tcc_libpaths "{B}:{R}/lib:/system/lib${S}"
     default tcc_crtprefix "{R}/lib"
     default tcc_elfinterp "/system/bin/linker${S}"
-    default tcc_switches "-Wl,-rpath=$sysroot/lib,-section-alignment=0x1000"
+    default tcc_switches "-Wl,-rpath=$sysroot/lib"
     ;;
   WIN32)
     mingw32="yes"
@@ -479,6 +479,10 @@ if test "$cpu" = "arm"; then
   fi
 fi
 
+if test -n "$dwarf"; then
+  confvars="$confvars dwarf=$dwarf"
+fi
+
 # a final configuration tuning
 if test "$cc_name" != "tcc"; then
   OPT1="-Wdeclaration-after-statement -fno-strict-aliasing"
@@ -515,6 +519,7 @@ fcho "Doc directory       " "$docdir"
 fcho "Target root prefix  " "$sysroot"
 fcho "/usr/include dir    " "$tcc_usrinclude"
 echo "Source path         $source_path"
+echo "Build OS            $(uname -m -s)"
 echo "C compiler          $cc ($gcc_major.$gcc_minor)"
 echo "Target OS           $targetos"
 echo "CPU                 $cpu"

@@ -137,6 +137,9 @@
      DEF(TOK_FASTCALL1, "fastcall")
      DEF(TOK_FASTCALL2, "__fastcall")
      DEF(TOK_FASTCALL3, "__fastcall__")
+     DEF(TOK_THISCALL1, "thiscall")
+     DEF(TOK_THISCALL2, "__thiscall")
+     DEF(TOK_THISCALL3, "__thiscall__")
      DEF(TOK_REGPARM1, "regparm")
      DEF(TOK_REGPARM2, "__regparm__")
      DEF(TOK_CLEANUP1, "cleanup")
@@ -205,7 +208,8 @@
 /* pragma */
      DEF(TOK_pack, "pack")
 #if !defined(TCC_TARGET_I386) && !defined(TCC_TARGET_X86_64) && \
-    !defined(TCC_TARGET_ARM) && !defined(TCC_TARGET_ARM64)
+    !defined(TCC_TARGET_ARM) && !defined(TCC_TARGET_ARM64) && \
+    !defined(TCC_TARGET_RISCV64)
      /* already defined for assembler */
      DEF(TOK_ASM_push, "push")
      DEF(TOK_ASM_pop, "pop")
@@ -404,6 +408,8 @@
  DEF_ASMDIR(code32)
 #elif defined(TCC_TARGET_X86_64)
  DEF_ASMDIR(code64)
+#elif defined(TCC_TARGET_RISCV64)
+ DEF_ASMDIR(option)
 #endif
  DEF_ASMDIR(short)
  DEF_ASMDIR(long)

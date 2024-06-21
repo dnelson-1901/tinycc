@@ -3758,6 +3758,17 @@ void asm_dot_test(void)
 #endif
 }
 
+void asm_pcrel_test(void)
+{
+    unsigned o1, o2;
+    /* subtract text-section label from forward or other-section label */
+    asm("1: mov $2f-1b,%%eax; mov %%eax,%0" : "=m"(o1));
+    /* verify ... */
+    asm("2: lea 2b"RX",%eax; lea 1b"RX",%ecx; sub %ecx,%eax");
+    asm("mov %%eax,%0" : "=m"(o2));
+    printf("%s : %x\n", __FUNCTION__, o1 - o2); /* should be zero */
+}
+
 void asm_test(void)
 {
     char buf[128];
@@ -3849,6 +3860,7 @@ void asm_test(void)
     test_asm_dead_code();
     test_asm_call();
     asm_dot_test();
+    asm_pcrel_test();
     return;
  label1:
     goto label2;
@@ -3889,7 +3901,7 @@ static void builtin_test_bits(unsigned long long x, int cnt[])
     if ((unsigned long) x) cnt[7] += __builtin_ctzl(x);
     if ((unsigned long long) x) cnt[8] += __builtin_ctzll(x);
 
-#if CC_NAME != CC_clang || GCC_MAJOR >= 11
+#if GCC_MAJOR >= 6 && (CC_NAME != CC_clang || GCC_MAJOR >= 11)
 /* Apple clang 10 does not have __builtin_clrsb[l[l]] */
     cnt[9] += __builtin_clrsb(x);
     cnt[10] += __builtin_clrsbl(x);

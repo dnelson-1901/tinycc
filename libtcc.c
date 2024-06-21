@@ -60,6 +60,7 @@
 #endif
 #endif /* ONE_SOURCE */
 
+#define TCC_SEM_IMPL 1
 #include "tcc.h"
 
 /********************************************************/
@@ -100,7 +101,7 @@ BOOL WINAPI DllMain (HINSTANCE hDll, DWORD dwReason, LPVOID lpReserved)
 static inline char *config_tccdir_w32(char *path)
 {
     char *p;
-    GetModuleFileName(tcc_module, path, MAX_PATH);
+    GetModuleFileNameA(tcc_module, path, MAX_PATH);
     p = tcc_basename(normalize_slashes(strlwr(path)));
     if (p > path)
         --p;
@@ -110,55 +111,17 @@ static inline char *config_tccdir_w32(char *path)
 #define CONFIG_TCCDIR config_tccdir_w32(alloca(MAX_PATH))
 #endif
 
-#ifdef TCC_TARGET_PE
+#ifdef TCC_IS_NATIVE
 static void tcc_add_systemdir(TCCState *s)
 {
     char buf[1000];
-    GetSystemDirectory(buf, sizeof buf);
+    GetSystemDirectoryA(buf, sizeof buf);
     tcc_add_library_path(s, normalize_slashes(buf));
 }
 #endif
 #endif
 
 /********************************************************/
-#if CONFIG_TCC_SEMLOCK
-#if defined _WIN32
-ST_FUNC void wait_sem(TCCSem *p)
-{
-    if (!p->init)
-        InitializeCriticalSection(&p->cr), p->init = 1;
-    EnterCriticalSection(&p->cr);
-}
-ST_FUNC void post_sem(TCCSem *p)
-{
-    LeaveCriticalSection(&p->cr);
-}
-#elif defined __APPLE__
-/* Half-compatible MacOS doesn't have non-shared (process local)
-   semaphores.  Use the dispatch framework for lightweight locks.  */
-ST_FUNC void wait_sem(TCCSem *p)
-{
-    if (!p->init)
-        p->sem = dispatch_semaphore_create(1), p->init = 1;
-    dispatch_semaphore_wait(p->sem, DISPATCH_TIME_FOREVER);
-}
-ST_FUNC void post_sem(TCCSem *p)
-{
-    dispatch_semaphore_signal(p->sem);
-}
-#else
-ST_FUNC void wait_sem(TCCSem *p)
-{
-    if (!p->init)
-        sem_init(&p->sem, 0, 1), p->init = 1;
-    while (sem_wait(&p->sem) < 0 && errno == EINTR);
-}
-ST_FUNC void post_sem(TCCSem *p)
-{
-    sem_post(&p->sem);
-}
-#endif
-#endif
 
 PUB_FUNC void tcc_enter_state(TCCState *s1)
 {
@@ -238,7 +201,8 @@ ST_FUNC char *tcc_load_text(int fd)
 {
     int len = lseek(fd, 0, SEEK_END);
     char *buf = load_data(fd, 0, len + 1);
-    buf[len] = 0;
+    if (buf)
+        buf[len] = 0;
     return buf;
 }
 
@@ -266,7 +230,7 @@ static void *default_reallocator(void *ptr, unsigned long size)
     return ptr1;
 }
 
-static void libc_free(void *ptr)
+ST_FUNC void libc_free(void *ptr)
 {
     free(ptr);
 }
@@ -279,7 +243,7 @@ static void *(*reallocator)(void*, unsigned long) = default_reallocator;
 
 LIBTCCAPI void tcc_set_realloc(TCCReallocFunc *realloc)
 {
-    reallocator = realloc;
+    reallocator = realloc ? realloc : default_reallocator;
 }
 
 /* in case MEM_DEBUG is #defined */
@@ -373,7 +337,8 @@ PUB_FUNC void *tcc_malloc_debug(unsigned long size, const char *file, int line)
 {
     int ofs;
     mem_debug_header_t *header;
-
+    if (!size)
+        return NULL;
     header = tcc_malloc(sizeof(mem_debug_header_t) + size);
     header->magic1 = MEM_DEBUG_MAGIC1;
     header->magic2 = MEM_DEBUG_MAGIC2;
@@ -383,7 +348,6 @@ PUB_FUNC void *tcc_malloc_debug(unsigned long size, const char *file, int line)
     ofs = strlen(file) - MEM_DEBUG_FILE_LEN;
     strncpy(header->file_name, file + (ofs > 0 ? ofs : 0), MEM_DEBUG_FILE_LEN);
     header->file_name[MEM_DEBUG_FILE_LEN] = 0;
-
     WAIT_SEM(&mem_sem);
     header->next = mem_debug_chain;
     header->prev = NULL;
@@ -394,7 +358,6 @@ PUB_FUNC void *tcc_malloc_debug(unsigned long size, const char *file, int line)
     if (mem_cur_size > mem_max_size)
         mem_max_size = mem_cur_size;
     POST_SEM(&mem_sem);
-
     return MEM_USER_PTR(header);
 }
 
@@ -404,7 +367,6 @@ PUB_FUNC void tcc_free_debug(void *ptr)
     if (!ptr)
         return;
     header = malloc_check(ptr, "tcc_free");
-
     WAIT_SEM(&mem_sem);
     mem_cur_size -= header->size;
     header->size = (unsigned)-1;
@@ -422,7 +384,8 @@ PUB_FUNC void *tcc_mallocz_debug(unsigned long size, const char *file, int line)
 {
     void *ptr;
     ptr = tcc_malloc_debug(size,file,line);
-    memset(ptr, 0, size);
+    if (size)
+        memset(ptr, 0, size);
     return ptr;
 }
 
@@ -430,10 +393,14 @@ PUB_FUNC void *tcc_realloc_debug(void *ptr, unsigned long size, const char *file
 {
     mem_debug_header_t *header;
     int mem_debug_chain_update = 0;
+
     if (!ptr)
         return tcc_malloc_debug(size, file, line);
+    if (!size) {
+        tcc_free_debug(ptr);
+        return NULL;
+    }
     header = malloc_check(ptr, "tcc_realloc");
-
     WAIT_SEM(&mem_sem);
     mem_cur_size -= header->size;
     mem_debug_chain_update = (header == mem_debug_chain);
@@ -450,7 +417,6 @@ PUB_FUNC void *tcc_realloc_debug(void *ptr, unsigned long size, const char *file
     if (mem_cur_size > mem_max_size)
         mem_max_size = mem_cur_size;
     POST_SEM(&mem_sem);
-
     return MEM_USER_PTR(header);
 }
 
@@ -478,6 +444,7 @@ PUB_FUNC void tcc_memcheck(int d)
         }
         fflush(stderr);
         mem_cur_size = 0;
+        mem_max_size = 0;
         mem_debug_chain = NULL;
 #if MEM_DEBUG-0 == 2
         exit(2);
@@ -838,14 +805,11 @@ LIBTCCAPI TCCState *tcc_new(void)
     TCCState *s;
 
     s = tcc_mallocz(sizeof(TCCState));
-    if (!s)
-        return NULL;
 #ifdef MEM_DEBUG
     tcc_memcheck(1);
 #endif
 
 #undef gnu_ext
-
     s->gnu_ext = 1;
     s->tcc_ext = 1;
     s->nocommon = 1;
@@ -912,11 +876,13 @@ LIBTCCAPI void tcc_delete(TCCState *s1)
     cstr_free(&s1->cmdline_defs);
     cstr_free(&s1->cmdline_incl);
     cstr_free(&s1->linker_arg);
+    tcc_free(s1->dState);
 #ifdef TCC_IS_NATIVE
     /* free runtime memory */
     tcc_run_free(s1);
 #endif
-    tcc_free(s1->dState);
+    /* free loaded dlls array */
+    dynarray_reset(&s1->loaded_dlls, &s1->nb_loaded_dlls);
     tcc_free(s1);
 #ifdef MEM_DEBUG
     tcc_memcheck(-1);
@@ -1485,24 +1451,24 @@ static int tcc_set_linker(TCCState *s, const char *option)
             s->pe_stack_size = strtoul(p, &end, 10);
         } else if (link_option(option, "subsystem=", &p)) {
 #if defined(TCC_TARGET_I386) || defined(TCC_TARGET_X86_64)
-            if (!strcmp(p, "native")) {
+            if (strstart("native", &p)) {
                 s->pe_subsystem = 1;
-            } else if (!strcmp(p, "console")) {
+            } else if (strstart("console", &p)) {
                 s->pe_subsystem = 3;
-            } else if (!strcmp(p, "gui") || !strcmp(p, "windows")) {
+            } else if (strstart("gui", &p) || strstart("windows", &p)) {
                 s->pe_subsystem = 2;
-            } else if (!strcmp(p, "posix")) {
+            } else if (strstart("posix", &p)) {
                 s->pe_subsystem = 7;
-            } else if (!strcmp(p, "efiapp")) {
+            } else if (strstart("efiapp", &p)) {
                 s->pe_subsystem = 10;
-            } else if (!strcmp(p, "efiboot")) {
+            } else if (strstart("efiboot", &p)) {
                 s->pe_subsystem = 11;
-            } else if (!strcmp(p, "efiruntime")) {
+            } else if (strstart("efiruntime", &p)) {
                 s->pe_subsystem = 12;
-            } else if (!strcmp(p, "efirom")) {
+            } else if (strstart("efirom", &p)) {
                 s->pe_subsystem = 13;
 #elif defined(TCC_TARGET_ARM)
-            if (!strcmp(p, "wince")) {
+            if (strstart("wince", &p)) {
                 s->pe_subsystem = 9;
 #endif
             } else
@@ -1983,6 +1949,7 @@ dorun:
 #ifdef CONFIG_TCC_BACKTRACE
         case TCC_OPTION_bt:
             s->rt_num_callers = atoi(optarg); /* zero = default (6) */
+            goto enable_backtrace;
         enable_backtrace:
             s->do_backtrace = 1;
             s->do_debug = s->do_debug ? s->do_debug : 1;
@@ -2267,11 +2234,18 @@ PUB_FUNC void tcc_print_stats(TCCState *s1, unsigned total_time)
 #ifdef TCC_IS_NATIVE
     if (s1->run_size) {
         Section *s = s1->symtab;
-        int ms = s->data_offset + s->link->data_offset + s->hash->data_offset;
+        unsigned ms = s->data_offset + s->link->data_offset + s->hash->data_offset;
+        unsigned rs = s1->run_size;
         fprintf(stderr, ": %d to run, %d symbols, %d other,",
-            s1->run_size, ms, mem_cur_size - s1->run_size - ms);
+            rs, ms, mem_cur_size - rs - ms);
     }
 #endif
     fprintf(stderr, " %d max (bytes)\n", mem_max_size);
 #endif
 }
+
+#if ONE_SOURCE
+# undef malloc
+# undef realloc
+# undef free
+#endif
