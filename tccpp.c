@@ -1927,24 +1927,30 @@ ST_FUNC void preprocess(int is_bof)
             tok_flags |= TOK_FLAG_ENDIF;
         }
         break;
+
     case TOK_LINE:
         next_nomacro();
-        if (tok != TOK_PPNUM)
+        if (tok != TOK_PPNUM) {
     _line_err:
             tcc_error("wrong #line format");
+        }
+        goto _line_num;
     case TOK_PPNUM:
-        parse_number(tokc.str.data);
-        n = tokc.i;
+        if (parse_flags & PARSE_FLAG_ASM_FILE)
+            goto ignore;
+    _line_num:
+        for (n = 0, q = tokc.str.data; *q; ++q) {
+            if (!isnum(*q))
+                goto _line_err;
+            n = n * 10 + *q - '0';
+        }
         next_nomacro();
         if (tok != TOK_LINEFEED) {
             if (tok == TOK_PPSTR && tokc.str.data[0] == '"') {
                 tokc.str.data[tokc.str.size - 2] = 0;
                 tccpp_putfile(tokc.str.data + 1);
-            } else if (parse_flags & PARSE_FLAG_ASM_FILE)
-                goto ignore;
-            else
+            } else
                 goto _line_err;
-            next_nomacro();
         }
         if (file->fd > 0)
             total_lines += file->line_num - n;
@@ -3612,7 +3618,7 @@ static void putdefs(CString *cs, const char *p)
 
 static void tcc_predefs(TCCState *s1, CString *cs, int is_asm)
 {
-    cstr_printf(cs, "#define __TINYC__ 9%.2s\n", TCC_VERSION + 4);
+    cstr_printf(cs, "#define __TINYC__ 9%.2s\n", *& TCC_VERSION + 4);
     putdef(cs, "__VERSION__ \"" TCC_VERSION "\"");
     putdefs(cs, target_machine_defs);
     putdefs(cs, target_os_defs);

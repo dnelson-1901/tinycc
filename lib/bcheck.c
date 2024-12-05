@@ -37,6 +37,8 @@
 #include <sys/syscall.h>
 #endif
 
+#include "config.h"
+
 #define BOUND_DEBUG             (1)
 #define BOUND_STATISTIC         (1)
 
@@ -161,7 +163,7 @@ static pthread_spinlock_t bounds_spin;
 #define HAVE_TLS_FUNC          (1)
 #define HAVE_TLS_VAR           (0)
 #endif
-#if defined TCC_MUSL || defined __ANDROID__
+#if defined CONFIG_TCC_MUSL || defined __ANDROID__
 # undef HAVE_CTYPE
 #endif
 #endif
@@ -559,7 +561,9 @@ void * __bound_ptr_add(void *p, size_t offset)
             if (tree->is_invalid || addr + offset > tree->size) {
                 POST_SEM ();
                 if (print_warn_ptr_add)
-                    bound_warning("%p is outside of the region", p + offset);
+                    bound_warning("%p is outside of the region (0x%lx..0x%lx)",
+                                  p + offset, (long)tree->start,
+                                  (long)(tree->start + tree->size - 1));
                 if (never_fatal <= 0)
                     return INVALID_POINTER; /* return an invalid pointer */
                 return p + offset;
@@ -605,7 +609,9 @@ void * __bound_ptr_indir ## dsize (void *p, size_t offset)                     \
         if (addr <= tree->size) {                                              \
             if (tree->is_invalid || addr + offset + dsize > tree->size) {      \
                 POST_SEM ();                                                   \
-                bound_warning("%p is outside of the region", p + offset); \
+                bound_warning("%p is outside of the region (0x%lx..0x%lx)",    \
+                              p + offset, (long)tree->start,                   \
+                              (long)(tree->start + tree->size - 1));           \
                 if (never_fatal <= 0)                                          \
                     return INVALID_POINTER; /* return an invalid pointer */    \
                 return p + offset;                                             \
@@ -1105,11 +1111,9 @@ add_bounds:
     while (p[0] != 0) {
         tree = splay_insert(p[0], p[1], tree);
 #if BOUND_DEBUG
-        if (print_calls) {
-            dprintf(stderr, "%s, %s(): static var %p 0x%lx\n",
-                    __FILE__, __FUNCTION__,
-                    (void *) p[0], (unsigned long) p[1]);
-        }
+        dprintf(stderr, "%s, %s(): static var %p 0x%lx\n",
+                __FILE__, __FUNCTION__,
+                (void *) p[0], (unsigned long) p[1]);
 #endif
         p += 2;
     }
@@ -1185,7 +1189,7 @@ void __attribute__((destructor)) __bound_exit(void)
     dprintf(stderr, "%s, %s():\n", __FILE__, __FUNCTION__);
 
     if (inited) {
-#if !defined(_WIN32) && !defined(__APPLE__) && !defined TCC_MUSL && \
+#if !defined(_WIN32) && !defined(__APPLE__) && !defined CONFIG_TCC_MUSL && \
     !defined(__OpenBSD__) && !defined(__FreeBSD__) && !defined(__NetBSD__) && \
     !defined(__ANDROID__)
         if (print_heap) {

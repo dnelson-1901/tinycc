@@ -18,7 +18,11 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
-#if !defined ONE_SOURCE || ONE_SOURCE
+#ifndef ONE_SOURCE
+# define ONE_SOURCE 1
+#endif
+
+#if ONE_SOURCE
 #include "tccpp.c"
 #include "tccgen.c"
 #include "tccdbg.c"
@@ -60,7 +64,6 @@
 #endif
 #endif /* ONE_SOURCE */
 
-#define TCC_SEM_IMPL 1
 #include "tcc.h"
 
 /********************************************************/
@@ -567,6 +570,7 @@ static void error1(int mode, const char *fmt, va_list ap)
     BufferedFile **pf, *f;
     TCCState *s1 = tcc_state;
     CString cs;
+    int line = 0;
 
     tcc_exit_state(s1);
 
@@ -589,6 +593,8 @@ static void error1(int mode, const char *fmt, va_list ap)
     }
 
     cstr_new(&cs);
+    if (fmt[0] == '%' && fmt[1] == 'i' && fmt[2] == ':')
+        line = va_arg(ap, int), fmt += 3;
     f = NULL;
     if (s1->error_set_jmp_enabled) { /* we're called while parsing a file */
         /* use upper file if inline ":asm:" or token ":paste:" */
@@ -599,8 +605,9 @@ static void error1(int mode, const char *fmt, va_list ap)
         for(pf = s1->include_stack; pf < s1->include_stack_ptr; pf++)
             cstr_printf(&cs, "In file included from %s:%d:\n",
                 (*pf)->filename, (*pf)->line_num - 1);
-        cstr_printf(&cs, "%s:%d: ",
-            f->filename, f->line_num - ((tok_flags & TOK_FLAG_BOL) && !macro_ptr));
+        if (0 == line)
+            line = f->line_num - ((tok_flags & TOK_FLAG_BOL) && !macro_ptr);
+        cstr_printf(&cs, "%s:%d: ", f->filename, line);
     } else if (s1->current_filename) {
         cstr_printf(&cs, "%s: ", s1->current_filename);
     } else {
@@ -818,6 +825,7 @@ LIBTCCAPI TCCState *tcc_new(void)
     s->warn_implicit_function_declaration = 1;
     s->warn_discarded_qualifiers = 1;
     s->ms_extensions = 1;
+    s->unwind_tables = 1;
 
 #ifdef CHAR_IS_UNSIGNED
     s->char_is_unsigned = 1;
@@ -1000,6 +1008,8 @@ static int tcc_glob_so(TCCState *s1, const char *pattern, char *buf, int size)
 }
 #endif
 
+static int guess_filetype(const char *filename);
+
 ST_FUNC int tcc_add_file_internal(TCCState *s1, const char *filename, int flags)
 {
     int fd, ret = -1;
@@ -1009,6 +1019,9 @@ ST_FUNC int tcc_add_file_internal(TCCState *s1, const char *filename, int flags)
     if (tcc_glob_so(s1, filename, buf, sizeof buf) >= 0)
         filename = buf;
 #endif
+
+    if (0 == (flags & AFF_TYPE_MASK))
+        flags |= guess_filetype(filename);
 
     /* ignore binary files with -E */
     if (s1->output_type == TCC_OUTPUT_PREPROCESS
@@ -1119,10 +1132,10 @@ check_success:
     return ret;
 }
 
-LIBTCCAPI int tcc_add_file(TCCState *s, const char *filename)
+static int guess_filetype(const char *filename)
 {
-    int filetype = s->filetype;
-    if (0 == (filetype & AFF_TYPE_MASK)) {
+    int filetype = 0;
+    if (1) {
         /* use a file extension to detect a filetype */
         const char *ext = tcc_fileextension(filename);
         if (ext[0]) {
@@ -1141,7 +1154,12 @@ LIBTCCAPI int tcc_add_file(TCCState *s, const char *filename)
             filetype = AFF_TYPE_C;
         }
     }
-    return tcc_add_file_internal(s, filename, filetype | AFF_PRINT_ERROR);
+    return filetype;
+}
+
+LIBTCCAPI int tcc_add_file(TCCState *s, const char *filename)
+{
+    return tcc_add_file_internal(s, filename, s->filetype | AFF_PRINT_ERROR);
 }
 
 LIBTCCAPI int tcc_add_library_path(TCCState *s, const char *pathname)
@@ -1158,12 +1176,12 @@ static int tcc_add_library_internal(TCCState *s1, const char *fmt,
 
     for(i = 0; i < nb_paths; i++) {
         snprintf(buf, sizeof(buf), fmt, paths[i], filename);
-        ret = tcc_add_file_internal(s1, buf, (flags & ~AFF_PRINT_ERROR) | AFF_TYPE_BIN);
+        ret = tcc_add_file_internal(s1, buf, flags & ~AFF_PRINT_ERROR);
         if (ret != FILE_NOT_FOUND)
             return ret;
     }
     if (flags & AFF_PRINT_ERROR)
-        tcc_error_noabort("file '%s' not found", filename);
+        tcc_error_noabort("library '%s' not found", filename);
     return FILE_NOT_FOUND;
 }
 
@@ -1175,12 +1193,14 @@ ST_FUNC int tcc_add_dll(TCCState *s, const char *filename, int flags)
 }
 
 /* find [cross-]libtcc1.a and tcc helper objects in library path */
-ST_FUNC void tcc_add_support(TCCState *s1, const char *filename)
+ST_FUNC int tcc_add_support(TCCState *s1, const char *filename)
 {
+#if CONFIG_TCC_CROSS
     char buf[100];
     if (CONFIG_TCC_CROSSPREFIX[0])
         filename = strcat(strcpy(buf, CONFIG_TCC_CROSSPREFIX), filename);
-    tcc_add_dll(s1, filename, AFF_PRINT_ERROR);
+#endif
+    return tcc_add_dll(s1, filename, AFF_PRINT_ERROR);
 }
 
 #if !defined TCC_TARGET_PE && !defined TCC_TARGET_MACHO
@@ -1215,15 +1235,12 @@ LIBTCCAPI int tcc_add_library(TCCState *s, const char *libraryname)
             return ret;
         ++pp;
     }
-    return FILE_NOT_FOUND;
-}
-
-PUB_FUNC int tcc_add_library_err(TCCState *s1, const char *libname)
-{
-    int ret = tcc_add_library(s1, libname);
-    if (ret == FILE_NOT_FOUND)
-        tcc_error_noabort("library '%s' not found", libname);
-    return ret;
+#if CONFIG_TCC_CROSS
+    /* hack for '<cross>-tcc -nostdlib -ltcc1' to find <cross>-libtcc1.a  */
+    if (0 == strcmp(libraryname, "tcc1"))
+        return tcc_add_support(s, TCC_LIBTCC1);
+#endif
+    return tcc_add_dll(s, libraryname, AFF_PRINT_ERROR);
 }
 
 /* handle #pragma comment(lib,) */
@@ -1231,7 +1248,7 @@ ST_FUNC void tcc_add_pragma_libs(TCCState *s1)
 {
     int i;
     for (i = 0; i < s1->nb_pragma_libs; i++)
-        tcc_add_library_err(s1, s1->pragma_libs[i]);
+        tcc_add_library(s1, s1->pragma_libs[i]);
 }
 
 LIBTCCAPI int tcc_add_symbol(TCCState *s1, const char *name, const void *val)
@@ -1693,6 +1710,9 @@ static const FlagDef options_f[] = {
     { offsetof(TCCState, ms_extensions), 0, "ms-extensions" },
     { offsetof(TCCState, dollars_in_identifiers), 0, "dollars-in-identifiers" },
     { offsetof(TCCState, test_coverage), 0, "test-coverage" },
+    { offsetof(TCCState, reverse_funcargs), 0, "reverse-funcargs" },
+    { offsetof(TCCState, gnu89_inline), 0, "gnu89-inline" },
+    { offsetof(TCCState, unwind_tables), 0, "asynchronous-unwind-tables" },
     { 0, 0, NULL }
 };
 
@@ -1764,6 +1784,8 @@ static const char dumpmachine_str[] =
     "openbsd"
 #elif TARGETOS_NetBSD
     "netbsd"
+#elif CONFIG_TCC_MUSL
+    "linux-musl"
 #else
     "linux-gnu"
 #endif
@@ -1953,7 +1975,7 @@ dorun:
         enable_backtrace:
             s->do_backtrace = 1;
             s->do_debug = s->do_debug ? s->do_debug : 1;
-	    s->dwarf = DWARF_VERSION;
+	    s->dwarf = CONFIG_DWARF_VERSION;
             break;
 #ifdef CONFIG_TCC_BCHECK
         case TCC_OPTION_b:
@@ -1963,7 +1985,7 @@ dorun:
 #endif
         case TCC_OPTION_g:
             s->do_debug = 2;
-            s->dwarf = DWARF_VERSION;
+            s->dwarf = CONFIG_DWARF_VERSION;
             if (strstart("dwarf", &optarg)) {
                 s->dwarf = (*optarg) ? (0 - atoi(optarg)) : DEFAULT_DWARF_VERSION;
             } else if (isnum(*optarg)) {
@@ -1999,7 +2021,7 @@ dorun:
             s->static_link = 1;
             break;
         case TCC_OPTION_std:
-            if (strcmp(optarg, "=c11") == 0)
+            if (strcmp(optarg, "=c11") == 0 || strcmp(optarg, "=gnu11") == 0)
                 s->cversion = 201112;
             break;
         case TCC_OPTION_shared:

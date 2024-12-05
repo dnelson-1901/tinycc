@@ -51,7 +51,7 @@ struct sym_version {
 #define shf_RELRO SHF_ALLOC
 static const char rdata[] = ".rdata";
 #else
-#define shf_RELRO s1->shf_RELRO
+#define shf_RELRO SHF_ALLOC /* eventually made SHF_WRITE in sort_sections() */
 static const char rdata[] = ".data.ro";
 #endif
 
@@ -60,12 +60,6 @@ static const char rdata[] = ".data.ro";
 ST_FUNC void tccelf_new(TCCState *s)
 {
     TCCState *s1 = s;
-
-#ifndef TCC_TARGET_PE
-    shf_RELRO = SHF_ALLOC;
-    if (s1->output_type != TCC_OUTPUT_MEMORY)
-        shf_RELRO |= SHF_WRITE; /* the ELF loader will set it to RO at runtime */
-#endif
 
     /* no section zero */
     dynarray_add(&s->sections, &s->nb_sections, NULL);
@@ -95,6 +89,12 @@ ST_FUNC void tccelf_new(TCCState *s)
         tcc_debug_new(s);
     }
 
+#if TCC_EH_FRAME
+    if (s->output_format != TCC_OUTPUT_FORMAT_ELF)
+        s->unwind_tables = 0;
+    tcc_eh_frame_start(s);
+#endif
+
 #ifdef CONFIG_TCC_BCHECK
     if (s->do_bounds_check) {
         /* if bound checking, then add corresponding sections */
@@ -102,6 +102,13 @@ ST_FUNC void tccelf_new(TCCState *s)
         bounds_section = new_section(s, ".bounds", SHT_PROGBITS, shf_RELRO);
         lbounds_section = new_section(s, ".lbounds", SHT_PROGBITS, shf_RELRO);
     }
+#endif
+
+#ifdef TCC_TARGET_PE
+    /* to make sure that -ltcc1 -Wl,-e,_start will grab the startup code
+       from libtcc1.a (unless _start defined) */
+    if (s->elf_entryname)
+        set_global_sym(s, s->elf_entryname, NULL, 0); /* SHN_UNDEF */
 #endif
 }
 
@@ -1124,8 +1131,8 @@ static void relocate_section(TCCState *s1, Section *s, Section *sr)
                 r = 0; /* cannot apply 64bit relocation to 32bit value */
             sr->data_offset = sr->sh_size = r;
 #ifdef CONFIG_TCC_PIE
-            if (r && 0 == (s->sh_flags & SHF_WRITE))
-                tcc_warning("%d relocations to ro-section %s", (unsigned)(r / sizeof *qrel), s->name);
+            if (r && (s->sh_flags & SHF_EXECINSTR))
+                tcc_warning("%d relocations to %s", (unsigned)(r / sizeof *qrel), s->name);
 #endif
         }
     }
@@ -1488,7 +1495,7 @@ static void add_init_array_defines(TCCState *s1, const char *section_name)
     s = have_section(s1, section_name);
     if (!s || !(s->sh_flags & SHF_ALLOC)) {
         end_offset = 0;
-        s = data_section;
+        s = text_section;
     } else {
         end_offset = s->data_offset;
     }
@@ -1756,7 +1763,7 @@ ST_FUNC void tcc_add_runtime(TCCState *s1)
         if (s1->do_bounds_check && s1->output_type != TCC_OUTPUT_DLL) {
             tcc_add_support(s1, "bcheck.o");
 # if !(TARGETOS_OpenBSD || TARGETOS_NetBSD)
-            tcc_add_library_err(s1, "dl");
+            tcc_add_library(s1, "dl");
 # endif
             lpthread = 1;
         }
@@ -1772,8 +1779,8 @@ ST_FUNC void tcc_add_runtime(TCCState *s1)
         }
 #endif
         if (lpthread)
-            tcc_add_library_err(s1, "pthread");
-        tcc_add_library_err(s1, "c");
+            tcc_add_library(s1, "pthread");
+        tcc_add_library(s1, "c");
 #ifdef TCC_LIBGCC
         if (!s1->static_link) {
             if (TCC_LIBGCC[0] == '/')
@@ -1783,7 +1790,7 @@ ST_FUNC void tcc_add_runtime(TCCState *s1)
         }
 #endif
 #if defined TCC_TARGET_ARM && TARGETOS_FreeBSD
-        tcc_add_library_err(s1, "gcc_s"); // unwind code
+        tcc_add_library(s1, "gcc_s"); // unwind code
 #endif
         if (TCC_LIBTCC1[0])
             tcc_add_support(s1, TCC_LIBTCC1);
@@ -1823,11 +1830,14 @@ static void tcc_add_linker_symbols(TCCState *s1)
     for(i = 1; i < s1->nb_sections; i++) {
         s = s1->sections[i];
         if ((s->sh_flags & SHF_ALLOC)
-            && (s->sh_type == SHT_PROGBITS
+            && (s->sh_type == SHT_PROGBITS || s->sh_type == SHT_NOBITS
                 || s->sh_type == SHT_STRTAB)) {
-            const char *p;
             /* check if section name can be expressed in C */
-            p = s->name;
+            const char *p0, *p;
+            p0 = s->name;
+            if (*p0 == '.')
+                ++p0;
+            p = p0;
             for(;;) {
                 int c = *p;
                 if (!c)
@@ -1836,9 +1846,9 @@ static void tcc_add_linker_symbols(TCCState *s1)
                     goto next_sec;
                 p++;
             }
-            snprintf(buf, sizeof(buf), "__start_%s", s->name);
+            snprintf(buf, sizeof(buf), "__start_%s", p0);
             set_global_sym(s1, buf, s, 0);
-            snprintf(buf, sizeof(buf), "__stop_%s", s->name);
+            snprintf(buf, sizeof(buf), "__stop_%s", p0);
             set_global_sym(s1, buf, s, -1);
         }
     next_sec: ;
@@ -2086,7 +2096,7 @@ static int set_sec_sizes(TCCState *s1)
                     /* allocate the section */
                     s->sh_flags |= SHF_ALLOC;
                     s->sh_size = count * sizeof(ElfW_Rel);
-                    if (!(s1->sections[s->sh_info]->sh_flags & SHF_WRITE))
+                    if (s1->sections[s->sh_info]->sh_flags & SHF_EXECINSTR)
                         textrel += count;
                 }
             }
@@ -2123,6 +2133,7 @@ struct dyn_inf {
 
     ElfW(Phdr) *phdr;
     int phnum;
+    int shnum;
     Section *interp;
     Section *note;
     Section *gnu_hash;
@@ -2135,7 +2146,7 @@ struct dyn_inf {
    program headers are filled since they contain info about the layout.
    We do the following ordering: interp, symbol tables, relocations, progbits,
    nobits */
-static int sort_sections(TCCState *s1, int *sec_order, Section *interp)
+static int sort_sections(TCCState *s1, int *sec_order, struct dyn_inf *d)
 {
     Section *s;
     int i, j, k, f, f0, n;
@@ -2144,63 +2155,73 @@ static int sort_sections(TCCState *s1, int *sec_order, Section *interp)
 
     for (i = 1; i < nb_sections; i++) {
         s = s1->sections[i];
-        if (s->sh_flags & SHF_ALLOC) {
+        if (0 == s->sh_name) {
+            j = 0x900; /* no sh_name: won't go to file */
+        } else if (s->sh_flags & SHF_ALLOC) {
             j = 0x100;
             if (s->sh_flags & SHF_WRITE)
                 j = 0x200;
             if (s->sh_flags & SHF_TLS)
                 j += 0x200;
-        } else if (s->sh_name) {
-            j = 0x700;
         } else {
-            j = 0x900; /* no sh_name: won't go to file */
+            j = 0x700;
         }
+        if (j >= 0x700 && s1->output_format != TCC_OUTPUT_FORMAT_ELF)
+            s->sh_size = 0, j = 0x900;
+
         if (s->sh_type == SHT_SYMTAB || s->sh_type == SHT_DYNSYM) {
             k = 0x10;
         } else if (s->sh_type == SHT_STRTAB && strcmp(s->name, ".stabstr")) {
             k = 0x11;
-            if (i == nb_sections - 1) /* ".shstrtab" assumed to remain last */
+            if (i == nb_sections - 1) /* ".shstrtab" assumed to stay last */
                 k = 0xff;
         } else if (s->sh_type == SHT_HASH || s->sh_type == SHT_GNU_HASH) {
             k = 0x12;
+        } else if (s->sh_type == SHT_GNU_verdef
+                  || s->sh_type == SHT_GNU_verneed
+                  || s->sh_type == SHT_GNU_versym) {
+            k = 0x13;
         } else if (s->sh_type == SHT_RELX) {
             k = 0x20;
             if (s1->plt && s == s1->plt->reloc)
                 k = 0x21;
+        } else if (s->sh_flags & SHF_EXECINSTR) {
+            k = 0x30;
+        /* RELRO sections --> */
         } else if (s->sh_type == SHT_PREINIT_ARRAY) {
             k = 0x41;
         } else if (s->sh_type == SHT_INIT_ARRAY) {
             k = 0x42;
         } else if (s->sh_type == SHT_FINI_ARRAY) {
             k = 0x43;
-#ifdef CONFIG_TCC_BCHECK
-        } else if (s == bounds_section || s == lbounds_section) {
-            k = 0x44;
-#endif
-        } else if (s == rodata_section || 0 == strcmp(s->name, ".data.rel.ro")) {
-            k = 0x45;
         } else if (s->sh_type == SHT_DYNAMIC) {
             k = 0x46;
         } else if (s == s1->got) {
             k = 0x47; /* .got as RELRO needs BIND_NOW in DT_FLAGS */
+        } else if (s->reloc && (s->reloc->sh_flags & SHF_ALLOC) && j == 0x100) {
+            k = 0x44;
+        /* <-- */
+        } else if (s->sh_type == SHT_NOTE) {
+            k = 0x60;
+        } else if (s->sh_type == SHT_NOBITS) {
+            k = 0x70; /* bss */
+        } else if (s == d->interp) {
+            k = 0x00;
         } else {
-            k = 0x50;
-            if (s->sh_type == SHT_NOTE)
-                k = 0x60;
-            if (s->sh_flags & SHF_EXECINSTR)
-                k = 0x70;
-            if (s->sh_type == SHT_NOBITS)
-                k = 0x80;
-            if (s == interp)
-                k = 0x00;
+            k = 0x50; /* data */
         }
         k += j;
 
+        if ((k & 0xfff0) == 0x140) {
+            /* make RELRO section writable */
+            k += 0x100, s->sh_flags |= SHF_WRITE;
+        }
         for (n = i; n > 1 && k < (f = sec_cls[n - 1]); --n)
             sec_cls[n] = f, sec_order[n] = sec_order[n - 1];
         sec_cls[n] = k, sec_order[n] = i;
     }
     sec_order[0] = 0;
+    d->shnum = 1;
 
     /* count PT_LOAD headers needed */
     n = f0 = 0;
@@ -2208,21 +2229,25 @@ static int sort_sections(TCCState *s1, int *sec_order, Section *interp)
         s = s1->sections[sec_order[i]];
         k = sec_cls[i];
         f = 0;
+        if (k < 0x900)
+            ++d->shnum;
         if (k < 0x700) {
             f = s->sh_flags & (SHF_ALLOC|SHF_WRITE|SHF_EXECINSTR|SHF_TLS);
 #if TARGETOS_NetBSD
 	    /* NetBSD only supports 2 PT_LOAD sections.
 	       See: https://blog.netbsd.org/tnf/entry/the_first_report_on_lld */
-	    if ((f & SHF_WRITE) == 0) f |= SHF_EXECINSTR;
+	    if ((f & SHF_WRITE) == 0)
+                f |= SHF_EXECINSTR;
 #else
             if ((k & 0xfff0) == 0x240) /* RELRO sections */
                 f |= 1<<4;
 #endif
-            if (f != f0) /* start new header when flags changed or relro */
+            /* start new header when flags changed or relro, but avoid zero memsz */
+            if (f != f0 && s->sh_size)
                 f0 = f, ++n, f |= 1<<8;
         }
         sec_cls[i] = f;
-        //printf("ph %d sec %02d : %3X %3X  %8.2X  %04X  %s\n", !!f * n, i, f, k, s->sh_type, s->sh_size, s->name);
+        //printf("ph %d sec %02d : %3X %3X  %8.2X  %04X  %s\n", (f>0) * n, i, f, k, s->sh_type, (int)s->sh_size, s->name);
     }
     return n;
 }
@@ -2253,7 +2278,7 @@ static int layout_sections(TCCState *s1, int *sec_order, struct dyn_inf *d)
     int file_offset;
 
     /* compute number of program headers */
-    phnum = sort_sections(s1, sec_order, d->interp);
+    phnum = sort_sections(s1, sec_order, d);
     phfill = 0; /* set to 1 to have dll's with a PT_PHDR */
     if (d->interp)
         phfill = 2;
@@ -2262,14 +2287,18 @@ static int layout_sections(TCCState *s1, int *sec_order, struct dyn_inf *d)
         ++phnum;
     if (d->dynamic)
         ++phnum;
+    if (eh_frame_hdr_section)
+        ++phnum;
     if (d->roinf)
         ++phnum;
     d->phnum = phnum;
     d->phdr = tcc_mallocz(phnum * sizeof(ElfW(Phdr)));
 
     file_offset = 0;
-    if (s1->output_format == TCC_OUTPUT_FORMAT_ELF)
-        file_offset = sizeof(ElfW(Ehdr)) + phnum * sizeof(ElfW(Phdr));
+    if (s1->output_format == TCC_OUTPUT_FORMAT_ELF) {
+        file_offset = (sizeof(ElfW(Ehdr)) + phnum * sizeof(ElfW(Phdr)) + 3) & -4;
+        file_offset += d->shnum * sizeof (ElfW(Shdr));
+    }
 
     s_align = ELF_PAGE_SIZE;
     if (s1->section_align)
@@ -2294,7 +2323,7 @@ static int layout_sections(TCCState *s1, int *sec_order, struct dyn_inf *d)
     }
     base = addr;
     /* compute address after headers */
-    addr = addr + (file_offset & (s_align - 1));
+    addr += file_offset;
 
     n = 0;
     for(i = 1; i < s1->nb_sections; i++) {
@@ -2380,6 +2409,8 @@ static int layout_sections(TCCState *s1, int *sec_order, struct dyn_inf *d)
         fill_phdr(++ph, PT_NOTE, d->note);
     if (d->dynamic)
         fill_phdr(++ph, PT_DYNAMIC, d->dynamic)->p_flags |= PF_W;
+    if (eh_frame_hdr_section)
+        fill_phdr(++ph, PT_GNU_EH_FRAME, eh_frame_hdr_section);
     if (d->roinf)
         fill_phdr(++ph, PT_GNU_RELRO, d->roinf)->p_flags |= PF_W;
     if (d->interp)
@@ -2392,7 +2423,7 @@ static int layout_sections(TCCState *s1, int *sec_order, struct dyn_inf *d)
         ph->p_align = 4;
         fill_phdr(ph, PT_PHDR, NULL);
     }
-    return file_offset;
+    return 0;
 }
 
 /* put dynamic tag */
@@ -2505,14 +2536,11 @@ static void update_reloc_sections(TCCState *s1, struct dyn_inf *dyninf)
 	}
     }
 }
-
-static int tidy_section_headers(TCCState *s1, int *sec_order);
 #endif /* ndef ELF_OBJ_ONLY */
 
 /* Create an ELF file on disk.
    This function handle ELF specific layout requirements */
-static int tcc_output_elf(TCCState *s1, FILE *f, int phnum, ElfW(Phdr) *phdr,
-                           int file_offset, int *sec_order)
+static int tcc_output_elf(TCCState *s1, FILE *f, int phnum, ElfW(Phdr) *phdr)
 {
     int i, shnum, offset, size, file_type;
     Section *s;
@@ -2523,18 +2551,11 @@ static int tcc_output_elf(TCCState *s1, FILE *f, int phnum, ElfW(Phdr) *phdr,
     shnum = s1->nb_sections;
 
     memset(&ehdr, 0, sizeof(ehdr));
-
     if (phnum > 0) {
         ehdr.e_phentsize = sizeof(ElfW(Phdr));
         ehdr.e_phnum = phnum;
         ehdr.e_phoff = sizeof(ElfW(Ehdr));
-#ifndef ELF_OBJ_ONLY
-        shnum = tidy_section_headers(s1, sec_order);
-#endif
     }
-
-    /* align to 4 */
-    file_offset = (file_offset + 3) & -4;
 
     /* fill header */
     ehdr.e_ident[0] = ELFMAG0;
@@ -2575,34 +2596,19 @@ static int tcc_output_elf(TCCState *s1, FILE *f, int phnum, ElfW(Phdr) *phdr,
             return -1;
     }
 
+    sort_syms(s1, s1->symtab);
+
     ehdr.e_machine = EM_TCC_TARGET;
     ehdr.e_version = EV_CURRENT;
-    ehdr.e_shoff = file_offset;
+    ehdr.e_shoff = (sizeof(ElfW(Ehdr)) + phnum * sizeof(ElfW(Phdr)) + 3) & -4;
     ehdr.e_ehsize = sizeof(ElfW(Ehdr));
     ehdr.e_shentsize = sizeof(ElfW(Shdr));
     ehdr.e_shnum = shnum;
     ehdr.e_shstrndx = shnum - 1;
 
-    fwrite(&ehdr, 1, sizeof(ElfW(Ehdr)), f);
+    offset = fwrite(&ehdr, 1, sizeof(ElfW(Ehdr)), f);
     if (phdr)
-        fwrite(phdr, 1, phnum * sizeof(ElfW(Phdr)), f);
-    offset = sizeof(ElfW(Ehdr)) + phnum * sizeof(ElfW(Phdr));
-
-    sort_syms(s1, symtab_section);
-
-    for(i = 1; i < shnum; i++) {
-        s = s1->sections[sec_order ? sec_order[i] : i];
-        if (s->sh_type != SHT_NOBITS) {
-            while (offset < s->sh_offset) {
-                fputc(0, f);
-                offset++;
-            }
-            size = s->sh_size;
-            if (size)
-                fwrite(s->data, 1, size, f);
-            offset += size;
-        }
-    }
+        offset += fwrite(phdr, 1, phnum * sizeof(ElfW(Phdr)), f);
 
     /* output section headers */
     while (offset < ehdr.e_shoff) {
@@ -2613,8 +2619,8 @@ static int tcc_output_elf(TCCState *s1, FILE *f, int phnum, ElfW(Phdr) *phdr,
     for(i = 0; i < shnum; i++) {
         sh = &shdr;
         memset(sh, 0, sizeof(ElfW(Shdr)));
-        s = s1->sections[i];
-        if (s) {
+        if (i) {
+            s = s1->sections[i];
             sh->sh_name = s->sh_name;
             sh->sh_type = s->sh_type;
             sh->sh_flags = s->sh_flags;
@@ -2627,20 +2633,33 @@ static int tcc_output_elf(TCCState *s1, FILE *f, int phnum, ElfW(Phdr) *phdr,
             sh->sh_offset = s->sh_offset;
             sh->sh_size = s->sh_size;
         }
-        fwrite(sh, 1, sizeof(ElfW(Shdr)), f);
+        offset += fwrite(sh, 1, sizeof(ElfW(Shdr)), f);
+    }
+
+    /* output sections */
+    for(i = 1; i < s1->nb_sections; i++) {
+        s = s1->sections[i];
+        if (s->sh_type != SHT_NOBITS) {
+            while (offset < s->sh_offset) {
+                fputc(0, f);
+                offset++;
+            }
+            size = s->sh_size;
+            if (size)
+                offset += fwrite(s->data, 1, size, f);
+        }
     }
     return 0;
 }
 
-static int tcc_output_binary(TCCState *s1, FILE *f,
-                              const int *sec_order)
+static int tcc_output_binary(TCCState *s1, FILE *f)
 {
     Section *s;
     int i, offset, size;
 
     offset = 0;
     for(i=1;i<s1->nb_sections;i++) {
-        s = s1->sections[sec_order[i]];
+        s = s1->sections[i];
         if (s->sh_type != SHT_NOBITS &&
             (s->sh_flags & SHF_ALLOC)) {
             while (offset < s->sh_offset) {
@@ -2657,7 +2676,7 @@ static int tcc_output_binary(TCCState *s1, FILE *f,
 
 /* Write an elf, coff or "binary" file */
 static int tcc_write_elf_file(TCCState *s1, const char *filename, int phnum,
-                              ElfW(Phdr) *phdr, int file_offset, int *sec_order)
+                              ElfW(Phdr) *phdr)
 {
     int fd, mode, file_type, ret;
     FILE *f;
@@ -2684,59 +2703,50 @@ static int tcc_write_elf_file(TCCState *s1, const char *filename, int phnum,
     else
 #endif
     if (s1->output_format == TCC_OUTPUT_FORMAT_ELF)
-        ret = tcc_output_elf(s1, f, phnum, phdr, file_offset, sec_order);
+        ret = tcc_output_elf(s1, f, phnum, phdr);
     else
-        ret = tcc_output_binary(s1, f, sec_order);
+        ret = tcc_output_binary(s1, f);
     fclose(f);
 
     return ret;
 }
 
 #ifndef ELF_OBJ_ONLY
-/* Sort section headers by assigned sh_addr, remove sections
+/* order sections according to sec_order, remove sections
    that we aren't going to output.  */
-static int tidy_section_headers(TCCState *s1, int *sec_order)
+static void reorder_sections(TCCState *s1, int *sec_order)
 {
-    int i, nnew, l, *backmap;
+    int i, nnew, k, *backmap;
     Section **snew, *s;
     ElfW(Sym) *sym;
 
-    snew = tcc_malloc(s1->nb_sections * sizeof(snew[0]));
     backmap = tcc_malloc(s1->nb_sections * sizeof(backmap[0]));
-    for (i = 0, nnew = 0, l = s1->nb_sections; i < s1->nb_sections; i++) {
-	s = s1->sections[sec_order[i]];
+    for (i = 0, nnew = 0, snew = NULL; i < s1->nb_sections; i++) {
+	k = sec_order[i];
+	s = s1->sections[k];
 	if (!i || s->sh_name) {
-	    backmap[sec_order[i]] = nnew;
-	    snew[nnew] = s;
-	    ++nnew;
+	    backmap[k] = nnew;
+            dynarray_add(&snew, &nnew, s);
 	} else {
-	    backmap[sec_order[i]] = 0;
-	    snew[--l] = s;
+	    backmap[k] = 0;
+            /* just remember to free them later */
+	    dynarray_add(&s1->priv_sections, &s1->nb_priv_sections, s);
 	}
     }
-    for (i = 0; i < nnew; i++) {
+    for (i = 1; i < nnew; i++) {
 	s = snew[i];
-	if (s) {
-	    s->sh_num = i;
-            if (s->sh_type == SHT_RELX)
-		s->sh_info = backmap[s->sh_info];
-	}
+        s->sh_num = i;
+        if (s->sh_type == SHT_RELX)
+            s->sh_info = backmap[s->sh_info];
+        else if (s->sh_type == SHT_SYMTAB || s->sh_type == SHT_DYNSYM)
+            for_each_elem(s, 1, sym, ElfW(Sym))
+                if (sym->st_shndx < s1->nb_sections)
+                    sym->st_shndx = backmap[sym->st_shndx];
     }
-
-    for_each_elem(symtab_section, 1, sym, ElfW(Sym))
-	if (sym->st_shndx != SHN_UNDEF && sym->st_shndx < SHN_LORESERVE)
-	    sym->st_shndx = backmap[sym->st_shndx];
-    if ( !s1->static_link ) {
-        for_each_elem(s1->dynsym, 1, sym, ElfW(Sym))
-	    if (sym->st_shndx != SHN_UNDEF && sym->st_shndx < SHN_LORESERVE)
-	        sym->st_shndx = backmap[sym->st_shndx];
-    }
-    for (i = 0; i < s1->nb_sections; i++)
-	sec_order[i] = i;
     tcc_free(s1->sections);
     s1->sections = snew;
+    s1->nb_sections = nnew;
     tcc_free(backmap);
-    return nnew;
 }
 
 #ifdef TCC_TARGET_ARM
@@ -2802,7 +2812,7 @@ static void alloc_sec_names(TCCState *s1, int is_obj);
 /* XXX: suppress unneeded sections */
 static int elf_output_file(TCCState *s1, const char *filename)
 {
-    int i, ret, file_type, file_offset, *sec_order;
+    int i, ret, file_type, *sec_order;
     struct dyn_inf dyninf = {0};
     Section *interp, *dynstr, *dynamic;
     int textrel, got_sym, dt_flags_1;
@@ -2874,6 +2884,10 @@ static int elf_output_file(TCCState *s1, const char *filename)
                 /* shared library case: simply export all global symbols */
                 export_global_syms(s1);
             }
+#if TCC_EH_FRAME
+	    /* fill with initial data */
+	    tcc_eh_frame_hdr(s1, 0);
+#endif
 	    dyninf.gnu_hash = create_gnu_hash(s1);
         } else {
             build_got_entries(s1, 0);
@@ -2881,7 +2895,6 @@ static int elf_output_file(TCCState *s1, const char *filename)
 	version_add (s1);
 
     textrel = set_sec_sizes(s1);
-    alloc_sec_names(s1, 0);
 
     if (!s1->static_link) {
         /* add a list of needed dlls */
@@ -2920,10 +2933,12 @@ static int elf_output_file(TCCState *s1, const char *filename)
         dynstr->sh_size = dynstr->data_offset;
     }
 
+    /* create and fill .shstrtab section */
+    alloc_sec_names(s1, 0);
     /* this array is used to reorder sections in the output file */
     sec_order = tcc_malloc(sizeof(int) * 2 * s1->nb_sections);
     /* compute section to program header mapping */
-    file_offset = layout_sections(s1, sec_order, &dyninf);
+    layout_sections(s1, sec_order, &dyninf);
 
         if (dynamic) {
             /* put in GOT the dynamic section address and relocate PLT */
@@ -2955,8 +2970,13 @@ static int elf_output_file(TCCState *s1, const char *filename)
     if (dyninf.gnu_hash)
         update_gnu_hash(s1, dyninf.gnu_hash);
 
+    reorder_sections(s1, sec_order);
+#if TCC_EH_FRAME
+    /* fill with final data */
+    tcc_eh_frame_hdr(s1, 1);
+#endif
     /* Create the ELF file with name 'filename' */
-    ret = tcc_write_elf_file(s1, filename, dyninf.phnum, dyninf.phdr, file_offset, sec_order);
+    ret = tcc_write_elf_file(s1, filename, dyninf.phnum, dyninf.phdr);
  the_end:
     tcc_free(sec_order);
     tcc_free(dyninf.phdr);
@@ -2976,7 +2996,7 @@ static void alloc_sec_names(TCCState *s1, int is_obj)
         s = s1->sections[i];
         if (is_obj)
             s->sh_size = s->data_offset;
-	if (s == strsec || s->sh_size || (s->sh_flags & SHF_ALLOC))
+	if (s->sh_size || s == strsec || (s->sh_flags & SHF_ALLOC) || is_obj)
             s->sh_name = put_elf_str(strsec, s->name);
     }
     strsec->sh_size = strsec->data_offset;
@@ -2990,7 +3010,8 @@ static int elf_output_obj(TCCState *s1, const char *filename)
     s1->nb_errors = 0;
     /* Allocate strings for section names */
     alloc_sec_names(s1, 1);
-    file_offset = sizeof (ElfW(Ehdr));
+    file_offset = (sizeof (ElfW(Ehdr)) + 3) & -4;
+    file_offset += s1->nb_sections * sizeof(ElfW(Shdr));
     for(i = 1; i < s1->nb_sections; i++) {
         s = s1->sections[i];
         file_offset = (file_offset + 15) & -16;
@@ -2999,7 +3020,7 @@ static int elf_output_obj(TCCState *s1, const char *filename)
             file_offset += s->sh_size;
     }
     /* Create the ELF file with name 'filename' */
-    ret = tcc_write_elf_file(s1, filename, 0, NULL, file_offset, NULL);
+    ret = tcc_write_elf_file(s1, filename, 0, NULL);
     return ret;
 }
 
@@ -3011,7 +3032,7 @@ LIBTCCAPI int tcc_output_file(TCCState *s, const char *filename)
         return elf_output_obj(s, filename);
 #ifdef TCC_TARGET_PE
     return  pe_output_file(s, filename);
-#elif TCC_TARGET_MACHO
+#elif defined TCC_TARGET_MACHO
     return macho_output_file(s, filename);
 #else
     return elf_output_file(s, filename);
@@ -3140,23 +3161,26 @@ invalid:
 	if (sh->sh_type == SHT_RELX)
 	  sh = &shdr[sh->sh_info];
         /* ignore sections types we do not handle (plus relocs to those) */
+        sh_name = strsec + sh->sh_name;
+        if (0 == strncmp(sh_name, ".debug_", 7)
+         || 0 == strncmp(sh_name, ".stab", 5)) {
+	    if (!s1->do_debug || seencompressed)
+	        continue;
+        } else if (0 == strncmp(sh_name, ".eh_frame", 9)) {
+            if (NULL == eh_frame_section)
+                continue;
+        } else
         if (sh->sh_type != SHT_PROGBITS &&
-#ifdef TCC_ARM_EABI
-            sh->sh_type != SHT_ARM_EXIDX &&
-#endif
-#if TARGETOS_OpenBSD || TARGETOS_FreeBSD || TARGETOS_NetBSD
-            sh->sh_type != SHT_X86_64_UNWIND &&
-#endif
             sh->sh_type != SHT_NOTE &&
             sh->sh_type != SHT_NOBITS &&
             sh->sh_type != SHT_PREINIT_ARRAY &&
             sh->sh_type != SHT_INIT_ARRAY &&
-            sh->sh_type != SHT_FINI_ARRAY &&
-            strcmp(strsec + sh->sh_name, ".stabstr")
+            sh->sh_type != SHT_FINI_ARRAY
+#ifdef TCC_ARM_EABI
+            && sh->sh_type != SHT_ARM_EXIDX
+#endif
             )
             continue;
-	if (seencompressed && 0 == strncmp(strsec + sh->sh_name, ".debug_", 7))
-	  continue;
 
 	sh = &shdr[i];
         sh_name = strsec + sh->sh_name;
@@ -3165,24 +3189,29 @@ invalid:
         /* find corresponding section, if any */
         for(j = 1; j < s1->nb_sections;j++) {
             s = s1->sections[j];
-            if (!strcmp(s->name, sh_name)) {
-                if (!strncmp(sh_name, ".gnu.linkonce",
-                             sizeof(".gnu.linkonce") - 1)) {
-                    /* if a 'linkonce' section is already present, we
-                       do not add it again. It is a little tricky as
-                       symbols can still be defined in
-                       it. */
-                    sm_table[i].link_once = 1;
-                    goto next;
-                }
-                if (stab_section) {
-                    if (s == stab_section)
-                        stab_index = i;
-                    if (s == stab_section->link)
-                        stabstr_index = i;
-                }
-                goto found;
+            if (strcmp(s->name, sh_name))
+                continue;
+            if (sh->sh_type != s->sh_type
+                && s != eh_frame_section
+                ) {
+                tcc_error_noabort("section type conflict: %s %02x <> %02x", s->name, sh->sh_type, s->sh_type);
+                goto the_end;
             }
+            if (!strncmp(sh_name, ".gnu.linkonce", 13)) {
+                /* if a 'linkonce' section is already present, we
+                   do not add it again. It is a little tricky as
+                   symbols can still be defined in
+                   it. */
+                sm_table[i].link_once = 1;
+                goto next;
+            }
+            if (stab_section) {
+                if (s == stab_section)
+                    stab_index = i;
+                if (s == stab_section->link)
+                    stabstr_index = i;
+            }
+            goto found;
         }
         /* not found: create new section */
         s = new_section(s1, sh_name, sh->sh_type, sh->sh_flags & ~SHF_GROUP);
@@ -3192,14 +3221,6 @@ invalid:
         s->sh_entsize = sh->sh_entsize;
         sm_table[i].new_section = 1;
     found:
-        if (sh->sh_type != s->sh_type
-#if TARGETOS_OpenBSD || TARGETOS_FreeBSD || TARGETOS_NetBSD
-            && strcmp (s->name, ".eh_frame")
-#endif
-            ) {
-            tcc_error_noabort("invalid section type");
-            goto the_end;
-        }
         /* align start of section */
         s->data_offset += -s->data_offset & (sh->sh_addralign - 1);
         if (sh->sh_addralign > s->sh_addralign)
@@ -3385,6 +3406,8 @@ static int read_ar_header(int fd, int offset, ArchiveHeader *hdr)
     len = full_read(fd, hdr, sizeof(ArchiveHeader));
     if (len != sizeof(ArchiveHeader))
         return len ? -1 : 0;
+    if (memcmp(hdr->ar_fmag, ARFMAG, sizeof hdr->ar_fmag))
+        return -1;
     p = hdr->ar_name;
     for (e = p + sizeof hdr->ar_name; e > p && e[-1] == ' ';)
         --e;
@@ -3406,7 +3429,7 @@ static int tcc_load_alacarte(TCCState *s1, int fd, int size, int entrysize)
 
     data = tcc_malloc(size);
     if (full_read(fd, data, size) != size)
-        goto the_end;
+        goto invalid;
     nsyms = get_be(data, entrysize);
     ar_index = data + entrysize;
     ar_names = (char *) ar_index + nsyms * entrysize;
@@ -3424,6 +3447,7 @@ static int tcc_load_alacarte(TCCState *s1, int fd, int size, int entrysize)
             off = get_be(ar_index + i * entrysize, entrysize);
             len = read_ar_header(fd, off, &hdr);
             if (len <= 0 || memcmp(hdr.ar_fmag, ARFMAG, 2)) {
+        invalid:
                 tcc_error_noabort("invalid archive");
                 goto the_end;
             }
@@ -3462,8 +3486,6 @@ ST_FUNC int tcc_load_archive(TCCState *s1, int fd, int alacarte)
             return tcc_error_noabort("invalid archive");
         file_offset += len;
         size = strtol(hdr.ar_size, NULL, 0);
-        /* align to even */
-        size = (size + 1) & ~1;
         if (alacarte) {
             /* coff symbol table : we handle it */
             if (!strcmp(hdr.ar_name, "/"))
@@ -3476,7 +3498,8 @@ ST_FUNC int tcc_load_archive(TCCState *s1, int fd, int alacarte)
             if (tcc_load_object_file(s1, fd, file_offset) < 0)
                 return -1;
         }
-        file_offset += size;
+        /* align to even */
+        file_offset = (file_offset + size + 1) & ~1;
     }
 }
 
@@ -3894,7 +3917,7 @@ static int ld_add_file(TCCState *s1, const char filename[])
 
 static int ld_add_file_list(TCCState *s1, const char *cmd, int as_needed)
 {
-    char filename[1024], libname[1024];
+    char filename[1024], libname[1016];
     int t, group, nblibs = 0, ret = 0;
     char **libs = NULL;
 

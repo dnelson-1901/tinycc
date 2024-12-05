@@ -384,47 +384,6 @@ static const char *pe_export_name(TCCState *s1, ElfW(Sym) *sym)
     return name;
 }
 
-static int pe_find_import(TCCState * s1, ElfW(Sym) *sym)
-{
-    char buffer[200];
-    const char *s, *p;
-    int sym_index = 0, n = 0;
-    int a, err = 0;
-
-    do {
-        s = pe_export_name(s1, sym);
-        a = 0;
-        if (n) {
-            /* second try: */
-	    if (sym->st_other & ST_PE_STDCALL) {
-                /* try w/0 stdcall deco (windows API convention) */
-	        p = strrchr(s, '@');
-	        if (!p || s[0] != '_')
-	            break;
-	        strcpy(buffer, s+1)[p-s-1] = 0;
-	    } else if (s[0] != '_') { /* try non-ansi function */
-	        buffer[0] = '_', strcpy(buffer + 1, s);
-	    } else if (0 == memcmp(s, "__imp_", 6)) { /* mingw 2.0 */
-	        strcpy(buffer, s + 6), a = 1;
-	    } else if (0 == memcmp(s, "_imp__", 6)) { /* mingw 3.7 */
-	        strcpy(buffer, s + 6), a = 1;
-	    } else {
-	        continue;
-	    }
-	    s = buffer;
-        }
-        sym_index = find_elf_sym(s1->dynsymtab_section, s);
-        // printf("find (%d) %d %s\n", n, sym_index, s);
-        if (sym_index
-            && ELFW(ST_TYPE)(sym->st_info) == STT_OBJECT
-            && 0 == (sym->st_other & ST_PE_IMPORT)
-            && 0 == a
-            ) err = -1, sym_index = 0;
-    } while (0 == sym_index && ++n < 2);
-    return n == 2 ? err : sym_index;
-}
-
-/*----------------------------------------------------------------------------*/
 
 static int dynarray_assoc(void **pp, int n, int key)
 {
@@ -525,7 +484,7 @@ static int pe_put_long_secname(char *secname, const char *name)
     const char *d = dwarf_secs;
     do {
         if (0 == strcmp(d, name)) {
-            sprintf(secname, "/%d", (int)(d - dwarf_secs + 4));
+            snprintf(secname, 8, "/%d", (int)(d - dwarf_secs + 4));
             return 1;
         }
         d = strchr(d, 0) + 1;
@@ -845,7 +804,7 @@ found_dll:
     return s;
 }
 
-void pe_free_imports(struct pe_info *pe)
+static void pe_free_imports(struct pe_info *pe)
 {
     int i;
     for (i = 0; i < pe->imp_count; ++i) {
@@ -905,12 +864,16 @@ static void pe_build_imports(struct pe_info *pe)
                 int iat_index = p->symbols[k]->iat_index;
                 int sym_index = p->symbols[k]->sym_index;
                 ElfW(Sym) *imp_sym = (ElfW(Sym) *)pe->s1->dynsymtab_section->data + sym_index;
-                ElfW(Sym) *org_sym = (ElfW(Sym) *)symtab_section->data + iat_index;
                 const char *name = (char*)pe->s1->dynsymtab_section->link->data + imp_sym->st_name;
                 int ordinal;
 
-                org_sym->st_value = thk_ptr;
-                org_sym->st_shndx = pe->thunk->sh_num;
+                /* patch symbol (and possibly its underscored alias) */
+                do {
+                    ElfW(Sym) *esym = (ElfW(Sym) *)symtab_section->data + iat_index;
+                    iat_index = esym->st_value;
+                    esym->st_value = thk_ptr;
+                    esym->st_shndx = pe->thunk->sh_num;
+                } while (iat_index);
 
                 if (dllref)
                     v = 0, ordinal = imp_sym->st_value; /* ordinal from pe_load_def */
@@ -1133,9 +1096,7 @@ static int pe_section_class(Section *s)
     name = s->name;
 
     if (0 == memcmp(name, ".stab", 5) || 0 == memcmp(name, ".debug_", 7)) {
-        if (s->s1->do_debug)
-            return sec_debug;
-
+        return sec_debug;
     } else if (flags & SHF_ALLOC) {
         if (type == SHT_PROGBITS
          || type == SHT_INIT_ARRAY
@@ -1279,33 +1240,8 @@ add_section:
 }
 
 /*----------------------------------------------------------------------------*/
-
-static int pe_isafunc(TCCState *s1, int sym_index)
-{
-    Section *sr = text_section->reloc;
-    ElfW_Rel *rel, *rel_end;
-    ElfW(Addr)info = ELFW(R_INFO)(sym_index, R_XXX_FUNCCALL);
-#ifdef R_XXX_FUNCCALL2
-    ElfW(Addr)info2 = ELFW(R_INFO)(sym_index, R_XXX_FUNCCALL2);
-#endif
-    if (!sr)
-        return 0;
-    rel_end = (ElfW_Rel *)(sr->data + sr->data_offset);
-    for (rel = (ElfW_Rel *)sr->data; rel < rel_end; rel++) {
-        if (rel->r_info == info)
-            return 1;
-#ifdef R_XXX_FUNCCALL2
-        if (rel->r_info == info2)
-            return 1;
-#endif
-    }
-    return 0;
-}
-
-/*----------------------------------------------------------------------------*/
 static int pe_check_symbols(struct pe_info *pe)
 {
-    ElfW(Sym) *sym;
     int sym_index, sym_end;
     int ret = 0;
     TCCState *s1 = pe->s1;
@@ -1314,34 +1250,54 @@ static int pe_check_symbols(struct pe_info *pe)
 
     sym_end = symtab_section->data_offset / sizeof(ElfW(Sym));
     for (sym_index = 1; sym_index < sym_end; ++sym_index) {
-
-        sym = (ElfW(Sym) *)symtab_section->data + sym_index;
+        ElfW(Sym) *sym = (ElfW(Sym) *)symtab_section->data + sym_index;
         if (sym->st_shndx == SHN_UNDEF) {
-
             const char *name = (char*)symtab_section->link->data + sym->st_name;
             unsigned type = ELFW(ST_TYPE)(sym->st_info);
-            int imp_sym = pe_find_import(pe->s1, sym);
+            int imp_sym;
             struct import_symbol *is;
 
-            if (imp_sym <= 0)
-                goto not_found;
+            int _imp_, n;
+            char buffer[200];
+            const char *s, *p;
 
-            if (type == STT_NOTYPE) {
-                /* symbols from assembler have no type, find out which */
-                if (pe_isafunc(s1, sym_index))
-                    type = STT_FUNC;
-                else
-                    type = STT_OBJECT;
-            }
+            n = _imp_ = 0;
+            do {
+                s = pe_export_name(s1, sym);
+                if (n) {
+                    /* second try: */
+                    if (sym->st_other & ST_PE_STDCALL) {
+                        /* try w/0 stdcall deco (windows API convention) */
+                        p = strrchr(s, '@');
+                        if (!p || s[0] != '_')
+                            break;
+                        strcpy(buffer, s+1)[p-s-1] = 0, s = buffer;
+                    } else if (s[0] != '_') { /* try non-ansi function */
+                        buffer[0] = '_', strcpy(buffer + 1, s), s = buffer;
+                    } else if (0 == memcmp(s, "_imp__", 6)) { /* mingw 3.7 */
+                        s += 6, _imp_ = 1;
+                    } else if (0 == memcmp(s, "__imp_", 6)) { /* mingw 2.0 */
+                        s += 6, _imp_ = 1;
+                    } else {
+                        break;
+                    }
+                }
+                imp_sym = find_elf_sym(s1->dynsymtab_section, s);
+            } while (0 == imp_sym && ++n < 2);
+
+            //printf("pe_find_export (%d) %4x %s\n", n, imp_sym, name);
+            if (0 == imp_sym)
+                continue; /* will throw the 'undefined' error in relocate_syms() */
 
             is = pe_add_import(pe, imp_sym);
 
-            if (type == STT_FUNC) {
+            if (type == STT_FUNC
+                /* symbols from assembler often have no type */
+                || type == STT_NOTYPE) {
                 unsigned offset = is->thk_offset;
                 if (offset) {
                     /* got aliased symbol, like stricmp and _stricmp */
                 } else {
-                    char buffer[100];
                     unsigned char *p;
 
                     /* add a helper symbol, will be patched later in
@@ -1374,28 +1330,18 @@ static int pe_check_symbols(struct pe_info *pe)
                 }
                 /* tcc_realloc might have altered sym's address */
                 sym = (ElfW(Sym) *)symtab_section->data + sym_index;
-
                 /* patch the original symbol */
                 sym->st_value = offset;
                 sym->st_shndx = text_section->sh_num;
                 sym->st_other &= ~ST_PE_EXPORT; /* do not export */
-                continue;
-            }
 
-            if (type == STT_OBJECT) { /* data, ptr to that should be */
-                if (0 == is->iat_index) {
-                    /* original symbol will be patched later in pe_build_imports */
-                    is->iat_index = sym_index;
-                    continue;
-                }
+            } else { /* STT_OBJECT */
+                if (0 == _imp_ && 0 == (sym->st_other & ST_PE_IMPORT))
+                    ret = tcc_error_noabort("symbol '%s' is missing __declspec(dllimport)", name);
+                /* original symbol will be patched later in pe_build_imports */
+                sym->st_value = is->iat_index; /* chain potential alias */
+                is->iat_index = sym_index;
             }
-
-        not_found:
-            if (ELFW(ST_BIND)(sym->st_info) == STB_WEAK)
-                /* STB_WEAK undefined symbols are accepted */
-                continue;
-            ret = tcc_error_noabort("undefined symbol '%s'%s", name,
-                imp_sym < 0 ? ", missing __declspec(dllimport)?":"");
 
         } else if (pe->s1->rdynamic
                    && ELFW(ST_BIND)(sym->st_info) != STB_LOCAL) {
@@ -1546,36 +1492,6 @@ static void pe_print_sections(TCCState *s1, const char *fname)
 #endif
 
 /* ------------------------------------------------------------- */
-/* helper function for load/store to insert one more indirection */
-
-#if defined TCC_TARGET_I386 || defined TCC_TARGET_X86_64
-ST_FUNC SValue *pe_getimport(SValue *sv, SValue *v2)
-{
-    int r2;
-    if ((sv->r & (VT_VALMASK|VT_SYM)) != (VT_CONST|VT_SYM) || (sv->r2 != VT_CONST))
-        return sv;
-    if (!sv->sym->a.dllimport)
-        return sv;
-    // printf("import %04x %04x %04x %s\n", sv->type.t, sv->sym->type.t, sv->r, get_tok_str(sv->sym->v, NULL));
-    memset(v2, 0, sizeof *v2);
-    v2->type.t = VT_PTR;
-    v2->r = VT_CONST | VT_SYM | VT_LVAL;
-    v2->sym = sv->sym;
-
-    r2 = get_reg(RC_INT);
-    load(r2, v2);
-    v2->r = r2;
-    if ((uint32_t)sv->c.i) {
-        vpushv(v2);
-        vpushi(sv->c.i);
-        gen_opi('+');
-        *v2 = *vtop--;
-    }
-    v2->type.t = sv->type.t;
-    v2->r |= sv->r & VT_LVAL;
-    return v2;
-}
-#endif
 
 ST_FUNC int pe_putimport(TCCState *s1, int dllindex, const char *name, addr_t value)
 {
@@ -1871,10 +1787,11 @@ static unsigned pe_add_uwwind_info(TCCState *s1)
             0x04, // UBYTE Size of prolog
             0x02, // UBYTE Count of unwind codes
             0x05, // UBYTE: 4 Frame Register (rbp), UBYTE: 4 Frame Register offset (scaled)
-            // USHORT * n Unwind codes array
+            // USHORT * n Unwind codes array (descending order)
             // 0x0b, 0x01, 0xff, 0xff, // stack size
-            0x04, 0x03, // set frame ptr (mov rsp -> rbp)
-            0x01, 0x50  // push reg (rbp)
+            // UBYTE offset of end of instr in prolog + 1, UBYTE:4 operation, UBYTE:4 info
+            0x04, 0x03, // 3:0 UWOP_SET_FPREG (mov rsp -> rbp)
+            0x01, 0x50, // 0:5 UWOP_PUSH_NONVOL (push rbp)
         };
 
         Section *s = text_section;
@@ -1994,7 +1911,7 @@ static void pe_add_runtime(TCCState *s1, struct pe_info *pe)
             tcc_add_support(s1, TCC_LIBTCC1);
         for (pp = libs; 0 != (p = *pp); ++pp) {
             if (*p)
-                tcc_add_library_err(s1, p);
+                tcc_add_library(s1, p);
             else if (PE_DLL != pe_type && PE_GUI != pe_type)
                 break;
         }
@@ -2067,8 +1984,8 @@ ST_FUNC int pe_output_file(TCCState *s1, const char *filename)
 #ifdef CONFIG_TCC_BCHECK
     tcc_add_bcheck(s1);
 #endif
-    pe_add_runtime(s1, &pe);
     tcc_add_pragma_libs(s1);
+    pe_add_runtime(s1, &pe);
     resolve_common_syms(s1);
     pe_set_options(s1, &pe);
     pe_check_symbols(&pe);
