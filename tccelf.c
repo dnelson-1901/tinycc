@@ -582,17 +582,24 @@ version_add (TCCState *s1)
     for (sym_index = 1; sym_index < end_sym; ++sym_index) {
         int dllindex, verndx;
         sym = &((ElfW(Sym) *)symtab->data)[sym_index];
-        if (sym->st_shndx != SHN_UNDEF)
-            continue; /* defined symbol doesn't need library version */
         name = (char *) symtab->link->data + sym->st_name;
         dllindex = find_elf_sym(s1->dynsymtab_section, name);
         verndx = (dllindex && dllindex < nb_sym_to_version)
                  ? sym_to_version[dllindex] : -1;
-        if (verndx >= 0) {
+        if (verndx >= 0
+            /* XXX: on android, clang refuses to link with a libtcc.so made by tcc
+               when defined symbols have a version > 1 or when the version is '0'.
+               Whereas version '1' for example for 'signal' in an exe defeats
+               bcheck's signal_redir. */
+            && (sym->st_shndx == SHN_UNDEF || (s1->output_type & TCC_OUTPUT_EXE))
+            ) {
             if (!sym_versions[verndx].out_index)
               sym_versions[verndx].out_index = nb_versions++;
             versym[sym_index] = sym_versions[verndx].out_index;
+        } else {
+            versym[sym_index] = 1; /* (*global*) */
         }
+        //printf("SYM %d %s\n", versym[sym_index], name);
     }
     /* generate verneed section, but not when it will be empty.  Some
        dynamic linkers look at their contents even when DTVERNEEDNUM and
@@ -631,6 +638,7 @@ version_add (TCCState *s1)
                     sv->out_index = -2;
                     vna->vna_name = put_elf_str(verneed_section->link, sv->version);
                     vna->vna_next = sizeof (*vna);
+                    //printf("LIB %d %s %s\n", vna->vna_other, sv->lib, verneed_section->link->data + vna->vna_name);
                     n_same_libs++;
                 }
                 if (prev >= 0)
@@ -3166,9 +3174,11 @@ invalid:
          || 0 == strncmp(sh_name, ".stab", 5)) {
 	    if (!s1->do_debug || seencompressed)
 	        continue;
+#if !(TARGETOS_OpenBSD || TARGETOS_FreeBSD || TARGETOS_NetBSD)
         } else if (0 == strncmp(sh_name, ".eh_frame", 9)) {
             if (NULL == eh_frame_section)
                 continue;
+#endif
         } else
         if (sh->sh_type != SHT_PROGBITS &&
             sh->sh_type != SHT_NOTE &&
@@ -3178,6 +3188,9 @@ invalid:
             sh->sh_type != SHT_FINI_ARRAY
 #ifdef TCC_ARM_EABI
             && sh->sh_type != SHT_ARM_EXIDX
+#endif
+#if TARGETOS_OpenBSD || TARGETOS_FreeBSD || TARGETOS_NetBSD
+            && sh->sh_type != SHT_X86_64_UNWIND
 #endif
             )
             continue;
@@ -3192,7 +3205,7 @@ invalid:
             if (strcmp(s->name, sh_name))
                 continue;
             if (sh->sh_type != s->sh_type
-                && s != eh_frame_section
+                && strcmp (s->name, ".eh_frame")
                 ) {
                 tcc_error_noabort("section type conflict: %s %02x <> %02x", s->name, sh->sh_type, s->sh_type);
                 goto the_end;
@@ -3237,6 +3250,11 @@ invalid:
         } else {
             s->data_offset += size;
         }
+        /* align end of section */
+        /* This is needed if we compile a c file after this */
+        if (s == text_section || s == data_section || s == rodata_section ||
+            s == bss_section || s == common_section)
+            s->data_offset += -s->data_offset & (s->sh_addralign - 1);
     next: ;
     }
 
