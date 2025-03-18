@@ -4716,8 +4716,16 @@ static int parse_btype(CType *type, AttributeDef *ad, int ignore_label)
         case TOK_COMPLEX:
             tcc_error("_Complex is not yet supported");
         case TOK_FLOAT:
+            /* macOS SDK uses it in math.h
+               fake the size and alignment
+            */
             u = VT_FLOAT;
+            /* tcc_warning("_Float16 is not yet supported. Skipped.");
+               I hope no one really uses it in the wild. */
             goto basic_type;
+        case TOK_FLOAT16:
+            u = VT_SHORT;
+
         case TOK_DOUBLE:
             if ((t & (VT_BTYPE|VT_LONG)) == VT_LONG) {
                 t = (t & ~(VT_BTYPE|VT_LONG)) | VT_LDOUBLE;
@@ -6192,6 +6200,7 @@ special_math_val:
             }
 
             next();
+            vcheck_cmp(); /* the generators don't like VT_CMP on vtop */
             gfunc_call(nb_args);
 
             if (ret_nregs < 0) {
@@ -8226,7 +8235,7 @@ static void decl_initializer_alloc(CType *type, AttributeDef *ad, int r,
 		sec = rodata_section;
             } else if (has_init) {
 		sec = data_section;
-                /*if (tcc_state->g_debug & 4)
+                /*if (g_debug & 4)
                     tcc_warning("rw data: %s", get_tok_str(v, 0));*/
             } else if (tcc_state->nocommon)
                 sec = bss_section;
