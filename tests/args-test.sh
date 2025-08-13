@@ -16,12 +16,12 @@ check() {
 # we take advantage of unsupported options to force tcc to print out the
 # string that it just parsed so we can compare it
 
-check "-Wl,-O" "tcc: error: argument to '-O' is missing"
-check "-Wl,--fini" "tcc: error: argument to '--fini' is missing"
-check "-Wl,-O2" "tcc: warning: unsupported linker option '-O2'"
-check "-Wl,-O,2" "tcc: warning: unsupported linker option '-O,2'"
+check "-Wl,-O" "tcc: warning: unsupported linker option '-O'"
+check "-Wl,--fini" "tcc: error: argument to '-Wl,--fini' is missing"
+check "-Wl,-O2" "tcc: error: unsupported linker option '-O2'"
+check "-Wl,-O,2" "tcc: warning: unsupported linker option '-O'"
 check "-Wl,--fini=2" "tcc: warning: unsupported linker option '--fini=2'"
-check "-Wl,--fini,2" "tcc: warning: unsupported linker option '--fini,2'"
+check "-Wl,--fini,2" "tcc: warning: unsupported linker option '--fini'"
 
 echo "$rv"
 if [ "$rv" != "OK" ] ; then

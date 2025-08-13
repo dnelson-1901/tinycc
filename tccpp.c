@@ -117,6 +117,8 @@ ST_FUNC void expect(const char *msg)
 
 #define USE_TAL
 
+#define	POINTER_SIZE sizeof(void *)
+
 #ifndef USE_TAL
 #define tal_free(al, p) tcc_free(p)
 #define tal_realloc(al, p, size) tcc_realloc(p, size)
@@ -157,7 +159,7 @@ typedef struct TinyAlloc {
 } TinyAlloc;
 
 typedef struct tal_header_t {
-    unsigned  size;
+    ALIGNED(POINTER_SIZE) unsigned size;
 #ifdef TAL_DEBUG
     int     line_num; /* negative line_num used for double free check */
     char    file_name[TAL_DEBUG_FILE_LEN + 1];
@@ -246,7 +248,7 @@ static void *tal_realloc_impl(TinyAlloc **pal, void *p, unsigned size TAL_DEBUG_
     tal_header_t *header;
     void *ret;
     int is_own;
-    unsigned adj_size = (size + 3) & -4;
+    unsigned adj_size = (size + POINTER_SIZE - 1) & -POINTER_SIZE;
     TinyAlloc *al = *pal;
 
 tail_call:
@@ -2053,7 +2055,7 @@ static void parse_escape_string(CString *outstr, const uint8_t *buf, int is_long
                         expect("more hex digits in universal-character-name");
                     else
                         goto add_hex_or_ucn;
-                    n = n * 16 + c;
+                    n = (unsigned) n * 16 + c;
                     p++;
                 } while (--i);
 		if (is_long) {
@@ -2231,19 +2233,27 @@ static void parse_string(const char *s, int len)
     }
 }
 
-/* we use 64 bit numbers */
+#ifdef TCC_USING_DOUBLE_FOR_LDOUBLE
+/* we use 64 bit (52 needed) numbers */
 #define BN_SIZE 2
+#else
+/* we use 128 bit (64/112 needed) numbers */
+#define BN_SIZE 4
+#endif
 
 /* bn = (bn << shift) | or_val */
-static void bn_lshift(unsigned int *bn, int shift, int or_val)
+static int bn_lshift(unsigned int *bn, int shift, int or_val)
 {
     int i;
     unsigned int v;
+    if (bn[BN_SIZE - 1] >> (32 - shift))
+	return shift;
     for(i=0;i<BN_SIZE;i++) {
         v = bn[i];
         bn[i] = (v << shift) | or_val;
         or_val = v >> (32 - shift);
     }
+    return 0;
 }
 
 static void bn_zero(unsigned int *bn)
@@ -2261,7 +2271,11 @@ static void parse_number(const char *p)
     int b, t, shift, frac_bits, s, exp_val, ch;
     char *q;
     unsigned int bn[BN_SIZE];
+#ifdef TCC_USING_DOUBLE_FOR_LDOUBLE
     double d;
+#else
+    long double d;
+#endif
 
     /* number */
     q = token_buf;
@@ -2312,6 +2326,7 @@ static void parse_number(const char *p)
                it by hand */
             /* hexadecimal or binary floats */
             /* XXX: handle overflows */
+            frac_bits = 0;
             *q = '\0';
             if (b == 16)
                 shift = 4;
@@ -2330,9 +2345,8 @@ static void parse_number(const char *p)
                 } else {
                     t = t - '0';
                 }
-                bn_lshift(bn, shift, t);
+                frac_bits -= bn_lshift(bn, shift, t);
             }
-            frac_bits = 0;
             if (ch == '.') {
                 ch = *p++;
                 while (1) {
@@ -2348,7 +2362,7 @@ static void parse_number(const char *p)
                     }
                     if (t >= b)
                         tcc_error("invalid digit");
-                    bn_lshift(bn, shift, t);
+                    frac_bits -= bn_lshift(bn, shift, t);
                     frac_bits += shift;
                     ch = *p++;
                 }
@@ -2367,15 +2381,25 @@ static void parse_number(const char *p)
             if (ch < '0' || ch > '9')
                 expect("exponent digits");
             while (ch >= '0' && ch <= '9') {
-                exp_val = exp_val * 10 + ch - '0';
+		/* If exp_val is this large ldexp will return HUGE_VAL */
+		if (exp_val < 100000000)
+                    exp_val = exp_val * 10 + ch - '0';
                 ch = *p++;
             }
             exp_val = exp_val * s;
             
             /* now we can generate the number */
             /* XXX: should patch directly float number */
+#ifdef TCC_USING_DOUBLE_FOR_LDOUBLE
             d = (double)bn[1] * 4294967296.0 + (double)bn[0];
             d = ldexp(d, exp_val - frac_bits);
+#else
+            d = (long double)bn[3] * 79228162514264337593543950336.0L +
+	        (long double)bn[2] * 18446744073709551616.0L +
+	        (long double)bn[1] * 4294967296.0L +
+	        (long double)bn[0];
+            d = ldexpl(d, exp_val - frac_bits);
+#endif
             t = toup(ch);
             if (t == 'F') {
                 ch = *p++;
@@ -2388,12 +2412,11 @@ static void parse_number(const char *p)
 #ifdef TCC_USING_DOUBLE_FOR_LDOUBLE
                 tokc.d = d;
 #else
-                /* XXX: not large enough */
-                tokc.ld = (long double)d;
+                tokc.ld = d;
 #endif
             } else {
                 tok = TOK_CDOUBLE;
-                tokc.d = d;
+                tokc.d = (double)d;
             }
         } else {
             /* decimal floats */
@@ -3055,6 +3078,11 @@ static int *macro_arg_subst(Sym **nested_list, const int *macro_str, Sym *args)
                 cval.str.size = tokcstr.size;
                 cval.str.data = tokcstr.data;
                 tok_str_add2(&str, TOK_PPSTR, &cval);
+#ifdef TCC_TARGET_ARM
+            } else if ((parse_flags & PARSE_FLAG_ASM_FILE) && t == TOK_PPNUM) {
+                /* for example: mov r1,#0 */
+                --macro_str, tok_str_add(&str, '#');
+#endif
             } else {
                 expect("macro parameter after '#'");
             }

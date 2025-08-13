@@ -99,6 +99,11 @@ extern long double strtold (const char *__nptr, char **__endptr);
 #define offsetof(type, field) ((size_t) &((type *)0)->field)
 #endif
 
+#ifdef __clang__ // clang -fsanitize compains about: NULL+value
+#undef offsetof
+#define offsetof(type, field) __builtin_offsetof(type, field)
+#endif
+
 #ifndef countof
 #define countof(tab) (sizeof(tab) / sizeof((tab)[0]))
 #endif
@@ -1691,7 +1696,7 @@ dwarf_read_sleb128(unsigned char **ln, unsigned char *end)
         retval |= (byte & 0x7f) << (i * 7);
 	if ((byte & 0x80) == 0) {
 	    if ((byte & 0x40) && (i + 1) * 7 < 64)
-		retval |= -1LL << ((i + 1) * 7);
+		retval |= (uint64_t)-1LL << ((i + 1) * 7);
 	    break;
 	}
     }
@@ -1792,6 +1797,7 @@ ST_FUNC void asm_clobber(uint8_t *clobber_regs, const char *str);
 ST_FUNC int pe_load_file(struct TCCState *s1, int fd, const char *filename);
 ST_FUNC int pe_output_file(TCCState * s1, const char *filename);
 ST_FUNC int pe_putimport(TCCState *s1, int dllindex, const char *name, addr_t value);
+ST_FUNC int pe_setsubsy(TCCState *s1, const char *arg);
 #if defined TCC_TARGET_I386 || defined TCC_TARGET_X86_64
 #endif
 #ifdef TCC_TARGET_X86_64

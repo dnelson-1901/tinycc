@@ -1253,7 +1253,7 @@ static void patch_type(Sym *sym, CType *type)
     } else {
         if ((sym->type.t & VT_ARRAY) && type->ref->c >= 0) {
             /* set array size if it was omitted in extern declaration */
-            sym->type.ref->c = type->ref->c;
+            sym->type.ref = type->ref;
         }
         if ((type->t ^ sym->type.t) & VT_STATIC)
             tcc_warning("storage mismatch for redefinition of '%s'",
@@ -1374,6 +1374,7 @@ ST_FUNC void save_reg_upstack(int r, int n)
                 l = get_temp_local_var(size, align, &r2);
                 sv.r = VT_LOCAL | VT_LVAL;
                 sv.c.i = l;
+		sv.sym = NULL;
                 store(p->r & VT_VALMASK, &sv);
 #if defined(TCC_TARGET_I386) || defined(TCC_TARGET_X86_64)
                 /* x86 specific: need to pop fp register ST0 if saved */
@@ -3775,6 +3776,7 @@ ST_FUNC void vstore(void)
                 sv.type.t = VT_PTRDIFF_T;
                 sv.r = VT_LOCAL | VT_LVAL;
                 sv.c.i = vtop[-1].c.i;
+		sv.sym = NULL;
                 load(r, &sv);
                 vtop[-1].r = r | VT_LVAL;
             }
@@ -4567,7 +4569,7 @@ do_decl:
                         } else {
                             type1.t = (type1.t & ~VT_STRUCT_MASK)
                                 | VT_BITFIELD
-                                | (bit_size << (VT_STRUCT_SHIFT + 6));
+                                | ((unsigned)bit_size << (VT_STRUCT_SHIFT + 6));
                         }
                     }
                     if (v != 0 || (type1.t & VT_BTYPE) == VT_STRUCT) {
@@ -6709,11 +6711,16 @@ static void gfunc_return(CType *func_type)
             /* returning structure packed into registers */
             int size, addr, align, rc, n;
             size = type_size(func_type,&align);
-            if ((align & (ret_align - 1))
-                && ((vtop->r & VT_VALMASK) < VT_CONST /* pointer to struct */
-                    || (vtop->c.i & (ret_align - 1))
-                    )) {
-                loc = (loc - size) & -ret_align;
+            if (ret_nregs * regsize > size ||
+		((align & (ret_align - 1))
+                 && ((vtop->r & VT_VALMASK) < VT_CONST /* pointer to struct */
+                     || (vtop->c.i & (ret_align - 1))
+                     ))) {
+		if (ret_nregs * regsize > size)
+		    size = ret_nregs * regsize;
+		if (ret_align > align)
+		    align = ret_align;
+                loc = (loc - size) & -align;
                 addr = loc;
                 type = *func_type;
                 vset(&type, VT_LOCAL | VT_LVAL, addr);
@@ -6844,14 +6851,28 @@ static void end_switch(void)
 /* ------------------------------------------------------------------------- */
 /* __attribute__((cleanup(fn))) */
 
+/* protect symbol lvalues from further modification  */
+static void save_lvalues(void)
+{
+    SValue *sv = vtop;
+    while (sv >= vstack) {
+        if (sv->sym && (sv->r & VT_LVAL)) {
+            int align, size = type_size(&sv->type, &align);
+            int r2, l = get_temp_local_var(size, align, &r2);
+            vset(&sv->type, VT_LOCAL | VT_LVAL, l), vtop->r2 = r2;
+            vpushv(sv), *sv = vtop[-1], vstore(), --vtop;
+        }
+        --sv;
+    }
+}
+
 static void try_call_scope_cleanup(Sym *stop)
 {
     Sym *cls = cur_scope->cl.s;
-
     for (; cls != stop; cls = cls->next) {
 	Sym *fs = cls->cleanup_func;
 	Sym *vs = cls->prev_tok;
-
+	save_lvalues();
 	vpushsym(&fs->type, fs);
 	vset(&vs->type, vs->r, vs->c);
 	vtop->sym = vs;
@@ -8677,6 +8698,9 @@ static int decl(int l)
 		    if (sym->type.t != VT_VOID)
 		        tcc_error("redefinition of parameter '%s'",
 				  get_tok_str(v, NULL));
+		    if (func_vt.ref->f.func_type == FUNC_OLD &&
+			type.t == VT_FLOAT)
+			type.t = VT_DOUBLE;
 		    convert_parameter_type(&type);
 		    sym->type = type;
 		} else if (type.t & VT_TYPEDEF) {

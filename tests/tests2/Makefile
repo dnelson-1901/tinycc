@@ -31,6 +31,7 @@ ifeq ($(CONFIG_bcheck),no)
  SKIP += 116_bound_setjmp2.test
  SKIP += 117_builtins.test
  SKIP += 126_bound_global.test
+ SKIP += 132_bound_test.test
 endif
 ifeq ($(CONFIG_dll),no)
  SKIP += 113_btdll.test # no shared lib support yet
@@ -101,6 +102,7 @@ GEN-ALWAYS =
 112_backtrace.test 113_btdll.test 126_bound_global.test: FILTER += \
     -e 's;[0-9A-Fa-fx]\{5,\};........;g' \
     -e 's;0x[0-9A-Fa-f]\{1,\};0x?;g'
+112_backtrace.test: LEAK=ASAN_OPTIONS=detect_leaks=0
 
 # this test creates two DLLs and an EXE
 113_btdll.test: T1 = \
@@ -135,7 +137,7 @@ all test tests2.all: $(filter-out $(SKIP),$(TESTS))
 	@echo Test: $*...
 	@$(call T1,$<) $(T3)
 
-T1 = $(TCC) $(FLAGS) $(T2) $(ARGS)
+T1 = $(LEAK) $(TCC) $(FLAGS) $(T2) $(ARGS)
 T2 = $(if $(NORUN),$1 -o $(basename $@).exe && ./$(basename $@).exe,-run $1)
 T3 = $(FILTER) >$*.output 2>&1 || true \
      && diff -Nbu $(filter %.expect,$^) $*.output \
