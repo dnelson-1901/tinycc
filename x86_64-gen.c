@@ -444,7 +444,8 @@ void load(int r, SValue *sv)
             b = 0xdb, r = 5; /* fldt */
         } else if ((ft & VT_TYPE) == VT_BYTE || (ft & VT_TYPE) == VT_BOOL) {
             b = 0xbe0f;   /* movsbl */
-        } else if ((ft & VT_TYPE) == (VT_BYTE | VT_UNSIGNED)) {
+        } else if ((ft & VT_TYPE) == (VT_BYTE | VT_UNSIGNED) ||
+		   (ft & VT_TYPE) == (VT_BOOL | VT_UNSIGNED)) {
             b = 0xb60f;   /* movzbl */
         } else if ((ft & VT_TYPE) == VT_SHORT) {
             b = 0xbf0f;   /* movswl */
@@ -538,7 +539,8 @@ void load(int r, SValue *sv)
                     o(0x44 + REG_VALUE(r)*8); /* %xmmN */
                     o(0xf024);
                 } else {
-                    assert((v >= TREG_XMM0) && (v <= TREG_XMM7));
+		    if (!nocode_wanted)
+                        assert((v >= TREG_XMM0) && (v <= TREG_XMM7));
                     if ((ft & VT_BTYPE) == VT_FLOAT) {
                         o(0x100ff3);
                     } else {
@@ -548,7 +550,8 @@ void load(int r, SValue *sv)
                     o(0xc0 + REG_VALUE(v) + REG_VALUE(r)*8);
                 }
             } else if (r == TREG_ST0) {
-                assert((v >= TREG_XMM0) && (v <= TREG_XMM7));
+		if (!nocode_wanted)
+                    assert((v >= TREG_XMM0) && (v <= TREG_XMM7));
                 /* gen_cvt_ftof(VT_LDOUBLE); */
                 /* movsd %xmmN,-0x10(%rsp) */
                 o(0x110ff2);
@@ -933,7 +936,6 @@ void gfunc_call(int nb_args)
     vtop--;
 }
 
-
 #define FUNC_PROLOG_SIZE 11
 
 /* generate function prolog of type 't' */
@@ -975,8 +977,7 @@ void gfunc_prolog(Sym *func_sym)
             if (reg_param_index < REGN) {
                 gen_modrm64(0x89, arg_regs[reg_param_index], VT_LOCAL, NULL, addr);
             }
-            sym_push(sym->v & ~SYM_FIELD, type,
-                     VT_LLOCAL | VT_LVAL, addr);
+            gfunc_set_param(sym, addr, 1);
         } else {
             if (reg_param_index < REGN) {
                 /* save arguments passed by register */
@@ -989,8 +990,7 @@ void gfunc_prolog(Sym *func_sym)
                     gen_modrm64(0x89, arg_regs[reg_param_index], VT_LOCAL, NULL, addr);
                 }
             }
-            sym_push(sym->v & ~SYM_FIELD, type,
-		     VT_LOCAL | VT_LVAL, addr);
+            gfunc_set_param(sym, addr, 0);
         }
         addr += 8;
         reg_param_index++;
@@ -1587,8 +1587,7 @@ void gfunc_prolog(Sym *func_sym)
         }
 	default: break; /* nothing to be done for x86_64_mode_none */
         }
-        sym_push(sym->v & ~SYM_FIELD, type,
-                 VT_LOCAL | VT_LVAL, param_addr);
+        gfunc_set_param(sym, param_addr, 0);
     }
 
 #ifdef CONFIG_TCC_BCHECK
@@ -2156,6 +2155,15 @@ void gen_cvt_ftoi(int t)
     ft = vtop->type.t;
     bt = ft & VT_BTYPE;
     if (bt == VT_LDOUBLE) {
+	if (t != VT_INT) {
+	    vpush_helper_func(TOK___fixxfdi);
+	    vswap();
+	    gfunc_call(1);
+	    vpushi(0);
+	    vtop->r = REG_IRET;
+	    vtop->r2 = REG_IRE2;
+	    return;
+	}
         gen_cvt_ftof(VT_DOUBLE);
         bt = VT_DOUBLE;
     }
