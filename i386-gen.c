@@ -241,8 +241,23 @@ static void gen_modrm(int opc, int op_r2, int r, Sym *sym, int c)
 {
     int op_reg = REG_VALUE(op_r2) << 3;
 
+    if ((r & VT_SYM) && (sym->type.t & VT_TLS)) {
+#ifdef TCC_TARGET_PE
+        Sym *s2 = external_global_sym(TOK___tls_index, &int_type);
+        r = get_reg(RC_INT);
+        gen_modrm(0x8b, r, VT_SYM|VT_CONST, s2, 0); /* mov __tls_index, r */
+        o(0x02e0c1 | r << 8); /* shl 2,r */
+        oad(0x050364 | r << 19, 11*PTR_SIZE); /* add fs:0x2c,r */
+        gen_modrm(0x8b, r, r | VT_LVAL, 0, 0); /* mov (r),r */
+        o(opc), oad(0x80 | op_reg | r, c); /* mov #c(r),op_reg */
+        greloc(cur_text_section, sym, ind - 4, R_386_TLS_LE);
+#else
+        o(0x65); /* gs segment prefix */
+        o(opc), oad(0x05 | op_reg, c);
+        greloc(cur_text_section, sym, ind - 4, R_386_TLS_LE);
+#endif
 #if defined CONFIG_TCC_PIC
-    if ((r & (VT_VALMASK|VT_SYM)) == (VT_CONST|VT_SYM)) {
+    } else if ((r & (VT_VALMASK|VT_SYM)) == (VT_CONST|VT_SYM)) {
         int is_got = (op_r2 & TREG_MEM) && !(sym->type.t & VT_STATIC);
         int here = ind;
         get_pc_thunk(TREG_EBX, is_got);
@@ -261,9 +276,8 @@ static void gen_modrm(int opc, int op_r2, int r, Sym *sym, int c)
         } else {
             g(0x00 | op_reg | REG_VALUE(r));
         }
-    } else
 #endif
-    if ((r & VT_VALMASK) == VT_CONST) {
+    } else if ((r & VT_VALMASK) == VT_CONST) {
         /* constant memory reference */
         o(opc);
         o(0x05 | op_reg);
@@ -271,7 +285,7 @@ static void gen_modrm(int opc, int op_r2, int r, Sym *sym, int c)
     } else if ((r & VT_VALMASK) == VT_LOCAL) {
 	o(opc);
         /* currently, we use only ebp as base */
-        if (c == (char)c) {
+        if (c == (signed char)c) {
             /* short reference */
             o(0x45 | op_reg);
             g(c);
@@ -299,7 +313,7 @@ ST_FUNC void load(int r, SValue *sv)
 #if defined CONFIG_TCC_PIC
     /* we use indirect access via got */
     if ((fr & (VT_VALMASK|VT_SYM|VT_LVAL)) == (VT_CONST|VT_SYM|VT_LVAL)
-        && !(sv->sym->type.t & VT_STATIC)) {
+        && !(sv->sym->type.t & (VT_STATIC|VT_TLS))) {
         /* use the result register as a temporal register */
         int tr = r | TREG_MEM;
         if (is_float(ft)) {
@@ -346,8 +360,16 @@ ST_FUNC void load(int r, SValue *sv)
         }
         gen_modrm(opc, r, fr, sv->sym, fc);
     } else {
+        if ((fr & VT_SYM) && (sv->sym->type.t & VT_TLS)) {
+#ifdef TCC_TARGET_PE
+            gen_modrm(0x8d, r, fr, sv->sym, fc);
+#else
+            oad(0x058b65 | REG_VALUE(r) << 19, 0); /* mov gs:0,r */
+            oad(0xC081 | REG_VALUE(r) << 8, fc); /* add tpoffs,r */
+            greloc(cur_text_section, sv->sym, ind - 4, R_386_TLS_LE);
+#endif
 #if defined CONFIG_TCC_PIC
-        if ((fr & (VT_VALMASK|VT_SYM)) == (VT_CONST|VT_SYM)) {
+        } else if ((fr & (VT_VALMASK|VT_SYM)) == (VT_CONST|VT_SYM)) {
             if (sv->sym->type.t & VT_STATIC) {
                 get_pc_thunk(r, 0);
                 o(0x808d | REG_VALUE(r) * 0x900); /* lea $xx(r), r */
@@ -357,10 +379,8 @@ ST_FUNC void load(int r, SValue *sv)
                 o(0x808b | REG_VALUE(r) * 0x900); /* mov $xx(r), r */
                 gen_gotpcrel(r, sv->sym, fc);
             }
-        } else
-
 #endif
-        if (v == VT_CONST) {
+        } else if (v == VT_CONST) {
             o(0xb8 + r); /* mov $xx, r */
             gen_addr32(fr, sv->sym, fc);
         } else if (v == VT_LOCAL) {
@@ -404,7 +424,8 @@ ST_FUNC void store(int r, SValue *v)
         opc = 0xdd; /* fstpl */
         r = 2;
     } else if (bt == VT_LDOUBLE) {
-        opc = 0xdbc0d9; /* fld %st(0), fstpt */
+        o(0xc0d9); /* fld %st(0), fstpt */
+        opc = 0xdb;
         r = 7;
     } else if (bt == VT_SHORT) {
         opc = 0x8966;
@@ -420,7 +441,7 @@ ST_FUNC void store(int r, SValue *v)
 #if defined CONFIG_TCC_PIC
     /* we need to access the variable via got */
     if ((v->r & (VT_VALMASK|VT_SYM)) == (VT_CONST|VT_SYM)
-        && !(v->sym->type.t & VT_STATIC)) {
+        && !(v->sym->type.t & (VT_STATIC|VT_TLS))) {
 	get_pc_thunk(TREG_EBX, 1);
 	o(0x9b8b); /* mov xx(%ebx),%ebx */
 	gen_gotpcrel(TREG_EBX, v->sym, v->c.i);
@@ -439,7 +460,7 @@ ST_FUNC void store(int r, SValue *v)
 
 static void gadd_sp(int val)
 {
-    if (val == (char)val) {
+    if (val == (signed char)val) {
         o(0xc483);
         g(val);
     } else {
@@ -447,7 +468,7 @@ static void gadd_sp(int val)
     }
 }
 
-#if defined CONFIG_TCC_BCHECK || defined TCC_TARGET_PE || defined CONFIG_TCC_PIC
+#if defined TCC_TARGET_PE || defined CONFIG_TCC_PIC
 static void gen_static_call(int v)
 {
     Sym *sym;
@@ -774,7 +795,7 @@ ST_FUNC void gjmp_addr(int a)
 {
     int r;
     r = a - ind - 2;
-    if (r == (char)r) {
+    if (r == (signed char)r) {
         g(0xeb);
         g(r);
     } else {
@@ -787,7 +808,7 @@ ST_FUNC void gjmp_addr(int a)
 ST_FUNC void gjmp_cond_addr(int a, int op)
 {
     int r = a - ind - 2;
-    if (r == (char)r)
+    if (r == (signed char)r)
         g(op - 32), g(r);
     else
         g(0x0f), gjmp2(op - 16, r - 4);
@@ -830,7 +851,7 @@ ST_FUNC void gen_opi(int op)
             r = gv(RC_INT);
             vswap();
             c = vtop->c.i;
-            if (c == (char)c) {
+            if (c == (signed char)c) {
                 /* generate inc and dec for smaller code */
                 if ((c == 1 || c == -1) && (op == '+' || op == '-')) {
                     opc = (c == 1) ^ (op == '+');
@@ -1176,6 +1197,22 @@ ST_FUNC void ggoto(void)
 /* bound check support functions */
 #ifdef CONFIG_TCC_BCHECK
 
+/* Need PIC for shared libraries */
+static void gen_bound_call(int v)
+{
+    Sym *sym;
+
+    sym = external_helper_sym(v);
+#if defined CONFIG_TCC_PIC
+    get_pc_thunk(TREG_EBX, 1);
+    oad(0xe8, -4);
+    greloc(cur_text_section, sym, ind - 4, R_386_PLT32);
+#else
+    oad(0xe8, -4);
+    greloc(cur_text_section, sym, ind - 4, R_386_PC32);
+#endif
+}
+
 static void gen_bounds_prolog(void)
 {
     /* leave some room for bound checking code */
@@ -1224,7 +1261,7 @@ static void gen_bounds_epilog(void)
         greloc(cur_text_section, sym_data, ind + 1, R_386_32);
         ind = ind + 5;
 #endif
-        gen_static_call(TOK___bound_local_new);
+        gen_bound_call(TOK___bound_local_new);
         ind = saved_ind;
     }
 
@@ -1239,7 +1276,7 @@ static void gen_bounds_epilog(void)
     greloc(cur_text_section, sym_data, ind + 1, R_386_32);
     oad(0xb8, 0); /* mov %eax, xxx */
 #endif
-    gen_static_call(TOK___bound_local_delete);
+    gen_bound_call(TOK___bound_local_delete);
     o(0x585a); /* restore returned value, if any */
 }
 #endif
